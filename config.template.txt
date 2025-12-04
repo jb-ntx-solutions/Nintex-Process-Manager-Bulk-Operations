@@ -1,0 +1,20 @@
+# Nintex Process Manager Configuration File
+# Lines starting with # are comments and will be ignored
+# Format: KEY=VALUE (no spaces around the = sign)
+
+# Your Nintex Process Manager site URL (without trailing slash)
+SiteURL=https://yourcompany.promapp.com
+
+# Your username (email address)
+Username=your.email@company.com
+
+# Your password
+Password=YourPasswordHere
+
+# Optional: Default Process Group ID for restore operations
+# Leave blank to be prompted each time
+DefaultRestoreGroupID=
+
+# Optional: Temporary group name for bulk delete operations
+# If not specified, will use "Bulk Delete Temporary Group"
+TempGroupName=Bulk Delete Temporary Group

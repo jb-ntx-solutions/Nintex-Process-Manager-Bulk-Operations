@@ -1,0 +1,26 @@
+# Configuration file with credentials
+config.txt
+
+# Results files
+*_Results_*.csv
+
+# PowerShell execution logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+~$*
+
+# Windows thumbnail cache
+Thumbs.db
+
+# macOS metadata
+.DS_Store
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
