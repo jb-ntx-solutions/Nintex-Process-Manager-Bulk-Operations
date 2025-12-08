@@ -160,6 +160,8 @@ function Get-ProcessesFromGroup {
         [bool]$IncludeSubgroups = $true
     )
 
+    Write-Host "  Looking for processes in group ID: $GroupID (Include subgroups: $IncludeSubgroups)" -ForegroundColor Gray
+
     $allProcesses = @()
     $pageSize = 200
     $pageIndex = 0
@@ -169,6 +171,15 @@ function Get-ProcessesFromGroup {
         $response = Invoke-ApiGet -Url $url -Token $Token
 
         if ($response -and $response.processes) {
+            Write-Host "    Page $($pageIndex + 1): Fetched $($response.processes.Count) processes" -ForegroundColor Gray
+
+            # Debug: Show sample process properties on first page
+            if ($pageIndex -eq 0 -and $response.processes.Count -gt 0) {
+                $sampleProcess = $response.processes[0]
+                Write-Host "    Sample process: $($sampleProcess.name)" -ForegroundColor Gray
+                Write-Host "    Properties: processGroupId=$($sampleProcess.processGroupId), processGroupPath=$($sampleProcess.processGroupPath)" -ForegroundColor Gray
+            }
+
             # Filter processes by group
             $groupProcesses = $response.processes | Where-Object {
                 if ($IncludeSubgroups) {
@@ -177,12 +188,18 @@ function Get-ProcessesFromGroup {
                     $_.processGroupId -eq $GroupID
                 }
             }
+
+            if ($groupProcesses.Count -gt 0) {
+                Write-Host "    Found $($groupProcesses.Count) matching processes on this page" -ForegroundColor Gray
+            }
+
             $allProcesses += $groupProcesses
         }
 
         $pageIndex++
     } while ($response -and $response.processes -and $response.processes.Count -eq $pageSize)
 
+    Write-Host "  Total processes found: $($allProcesses.Count)" -ForegroundColor Green
     return $allProcesses
 }
 
