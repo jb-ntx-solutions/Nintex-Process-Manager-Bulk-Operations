@@ -377,76 +377,19 @@ function Get-ProcessGroups {
     try {
         Write-Host "Fetching group tree from Process Manager..." -ForegroundColor Cyan
 
-        # First, we need to get the root group ID
-        # Try getting process list to extract root groups
+        # Get root groups by calling GetChildProcessGroupTreeItems without uniqueId parameter
         Write-Host "  Getting root groups..." -ForegroundColor Gray
-        $url = "$SiteURL/BFF/Api/Processes/All/List?ListType=0&PageSize=1&PageIndex=0"
+        $url = "$SiteURL/Process/View/GetChildProcessGroupTreeItems"
         $response = Invoke-ApiGet -Url $url -Token $Token
 
-        if (-not $response -or -not $response.processes -or $response.processes.Count -eq 0) {
-            Write-Host "  Could not find any processes to extract root group" -ForegroundColor Yellow
+        if (-not $response -or -not $response.treeItems) {
+            Write-Host "  Could not fetch root groups from API" -ForegroundColor Yellow
             return @()
         }
 
-        # Get a sample process to find the root group structure
-        $sampleProcess = $response.processes[0]
-        Write-Host "  Sample process: $($sampleProcess.name)" -ForegroundColor Gray
-
-        # Extract root group ID from the process path
-        # Path format is like "/661/" for root or "/661/663/" for nested
-        $rootGroupId = $null
-        $rootUniqueId = $null
-
-        if ($sampleProcess.processGroupPath) {
-            $pathParts = $sampleProcess.processGroupPath.Trim('/') -split '/'
-            if ($pathParts.Count -gt 0) {
-                $rootGroupId = [int]$pathParts[0]
-                Write-Host "  Found root group ID: $rootGroupId" -ForegroundColor Gray
-            }
-        }
-
-        # Now fetch all processes to get all root groups
-        Write-Host "  Fetching processes to identify root groups..." -ForegroundColor Gray
-        $allProcesses = @()
-        $pageSize = 200
-        $pageIndex = 0
-
-        do {
-            $url = "$SiteURL/BFF/Api/Processes/All/List?ListType=0&PageSize=$pageSize&PageIndex=$pageIndex"
-            $processResponse = Invoke-ApiGet -Url $url -Token $Token
-
-            if ($processResponse -and $processResponse.processes) {
-                $allProcesses += $processResponse.processes
-            }
-            $pageIndex++
-        } while ($processResponse -and $processResponse.processes -and $processResponse.processes.Count -eq $pageSize)
-
-        Write-Host "  Fetched $($allProcesses.Count) processes" -ForegroundColor Gray
-
-        # Extract unique root groups (groups at the first level)
-        $rootGroups = @{}
-        foreach ($process in $allProcesses) {
-            if ($process.processGroupPath) {
-                $pathParts = $process.processGroupPath.Trim('/') -split '/'
-                if ($pathParts.Count -gt 0) {
-                    $rootId = [int]$pathParts[0]
-                    if (-not $rootGroups.ContainsKey($rootId)) {
-                        # Try to find a process that belongs directly to this root group
-                        $rootProcess = $allProcesses | Where-Object {
-                            $_.processGroupId -eq $rootId
-                        } | Select-Object -First 1
-
-                        if ($rootProcess) {
-                            $rootGroups[$rootId] = @{
-                                id = $rootId
-                                uniqueId = $rootProcess.processGroupUniqueId
-                                name = $rootProcess.processGroupName
-                                parentId = $null
-                            }
-                        }
-                    }
-                }
-            }
+        # Filter for only group items (not processes or documents)
+        $rootGroups = $response.treeItems | Where-Object {
+            $_.itemType -eq "group" -or $_.itemType -eq "documentgroup"
         }
 
         Write-Host "  Found $($rootGroups.Count) root groups" -ForegroundColor Green
@@ -454,17 +397,25 @@ function Get-ProcessGroups {
         # Now recursively fetch the full tree for each root group
         $allGroups = @{}
 
-        foreach ($rootGroupId in $rootGroups.Keys) {
-            $rootGroup = $rootGroups[$rootGroupId]
-            Write-Host "  Fetching tree for: $($rootGroup.name)..." -ForegroundColor Gray
+        foreach ($rootGroup in $rootGroups) {
+            Write-Host "  Fetching tree for: $($rootGroup.title)..." -ForegroundColor Gray
 
             # Add root group
-            $allGroups[$rootGroup.id] = $rootGroup
+            $allGroups[$rootGroup.id] = @{
+                id = $rootGroup.id
+                uniqueId = $rootGroup.uniqueId
+                name = $rootGroup.title
+                parentId = $null
+                hasChild = $rootGroup.hasChild
+                totalSubgroups = $rootGroup.totalSubgroups
+            }
 
-            # Recursively fetch children
-            Get-ChildGroupsRecursive -SiteURL $SiteURL -Token $Token `
-                -ParentUniqueId $rootGroup.uniqueId -ParentId $null `
-                -AllGroups ([ref]$allGroups)
+            # Recursively fetch children if this group has any
+            if ($rootGroup.hasChild -and $rootGroup.totalSubgroups -gt 0) {
+                Get-ChildGroupsRecursive -SiteURL $SiteURL -Token $Token `
+                    -ParentUniqueId $rootGroup.uniqueId -ParentId $null `
+                    -AllGroups ([ref]$allGroups)
+            }
         }
 
         Write-Host "Successfully fetched $($allGroups.Count) groups total" -ForegroundColor Green
