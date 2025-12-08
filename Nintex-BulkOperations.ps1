@@ -330,23 +330,27 @@ function Get-ProcessGroups {
 
     try {
         # Try the BFF API endpoint first (most common in modern Nintex PM)
+        Write-Host "Trying BFF API endpoint..." -ForegroundColor Gray
         $url = "$SiteURL/BFF/Api/ProcessGroups/All"
         $response = Invoke-ApiGet -Url $url -Token $Token
 
         if ($response) {
+            Write-Host "Found $($response.Count) groups from BFF API" -ForegroundColor Green
             return $response
         }
 
         # Fallback to v1 API endpoint
+        Write-Host "Trying v1 API endpoint..." -ForegroundColor Gray
         $url = "$SiteURL/Api/v1/ProcessGroups"
         $response = Invoke-ApiGet -Url $url -Token $Token
 
         if ($response) {
+            Write-Host "Found groups from v1 API" -ForegroundColor Green
             return $response
         }
 
         # If both fail, we'll build the tree from process data
-        Write-Host "Unable to fetch group tree from API. Fetching from process data..." -ForegroundColor Yellow
+        Write-Host "Building group tree from process data..." -ForegroundColor Yellow
 
         # Get all processes and extract unique groups
         $allProcesses = @()
@@ -359,40 +363,84 @@ function Get-ProcessGroups {
 
             if ($processResponse -and $processResponse.processes) {
                 $allProcesses += $processResponse.processes
+                Write-Host "  Fetched page $($pageIndex + 1) - $($processResponse.processes.Count) processes" -ForegroundColor Gray
             }
             $pageIndex++
         } while ($processResponse -and $processResponse.processes -and $processResponse.processes.Count -eq $pageSize)
 
+        Write-Host "Total processes fetched: $($allProcesses.Count)" -ForegroundColor Gray
+
+        if ($allProcesses.Count -eq 0) {
+            Write-Host "No processes found to extract groups from" -ForegroundColor Yellow
+            return @()
+        }
+
+        # Debug: Show sample process structure
+        if ($allProcesses.Count -gt 0) {
+            $sampleProcess = $allProcesses[0]
+            Write-Host "Sample process properties: $($sampleProcess.PSObject.Properties.Name -join ', ')" -ForegroundColor Gray
+        }
+
         # Extract unique groups from processes
         $groups = @{}
         foreach ($process in $allProcesses) {
-            if ($process.processGroupId -and -not $groups.ContainsKey($process.processGroupId)) {
-                $groups[$process.processGroupId] = @{
-                    id = $process.processGroupId
-                    uniqueId = $process.processGroupUniqueId
-                    name = $process.processGroupName
-                    path = $process.processGroupPath
+            # Try different possible property names for group ID
+            $groupId = $null
+            if ($process.processGroupId) { $groupId = $process.processGroupId }
+            elseif ($process.ProcessGroupId) { $groupId = $process.ProcessGroupId }
+            elseif ($process.groupId) { $groupId = $process.groupId }
+
+            if ($groupId -and -not $groups.ContainsKey($groupId)) {
+                # Try different possible property names
+                $groupName = $null
+                if ($process.processGroupName) { $groupName = $process.processGroupName }
+                elseif ($process.ProcessGroupName) { $groupName = $process.ProcessGroupName }
+                elseif ($process.groupName) { $groupName = $process.groupName }
+
+                $groupPath = $null
+                if ($process.processGroupPath) { $groupPath = $process.processGroupPath }
+                elseif ($process.ProcessGroupPath) { $groupPath = $process.ProcessGroupPath }
+                elseif ($process.groupPath) { $groupPath = $process.groupPath }
+
+                $uniqueId = $null
+                if ($process.processGroupUniqueId) { $uniqueId = $process.processGroupUniqueId }
+                elseif ($process.ProcessGroupUniqueId) { $uniqueId = $process.ProcessGroupUniqueId }
+                elseif ($process.groupUniqueId) { $uniqueId = $process.groupUniqueId }
+
+                $groups[$groupId] = @{
+                    id = $groupId
+                    uniqueId = $uniqueId
+                    name = $groupName
+                    path = $groupPath
                     parentId = $null
                 }
             }
         }
 
+        Write-Host "Extracted $($groups.Count) unique groups" -ForegroundColor Gray
+
         # Calculate parent relationships from paths
         foreach ($groupId in $groups.Keys) {
             $group = $groups[$groupId]
-            if ($group.path -and $group.path -match '^/(\d+)(/(\d+))?') {
+            if ($group.path -and $group.path -match '/') {
                 $pathParts = $group.path.Trim('/') -split '/'
                 if ($pathParts.Count -gt 1) {
+                    # Parent is the second-to-last part of the path
                     $parentId = [int]$pathParts[$pathParts.Count - 2]
-                    $group.parentId = $parentId
+                    if ($groups.ContainsKey($parentId)) {
+                        $group.parentId = $parentId
+                    }
                 }
             }
         }
 
-        return $groups.Values | Sort-Object -Property name
+        $result = $groups.Values | Sort-Object -Property name
+        Write-Host "Returning $($result.Count) groups" -ForegroundColor Green
+        return $result
     }
     catch {
         Write-Host "Error fetching process groups: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host $_.ScriptStackTrace -ForegroundColor Red
         return @()
     }
 }
