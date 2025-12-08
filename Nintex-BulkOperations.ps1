@@ -351,6 +351,7 @@ function Get-ChildGroupsRecursive {
                         parentId = $ParentId
                         hasChild = $group.hasChild
                         totalSubgroups = $group.totalSubgroups
+                        itemOrder = $group.itemOrder
                     }
                 }
 
@@ -408,6 +409,7 @@ function Get-ProcessGroups {
                 parentId = $null
                 hasChild = $rootGroup.hasChild
                 totalSubgroups = $rootGroup.totalSubgroups
+                itemOrder = $rootGroup.itemOrder
             }
 
             # Recursively fetch children if this group has any
@@ -419,7 +421,7 @@ function Get-ProcessGroups {
         }
 
         Write-Host "Successfully fetched $($allGroups.Count) groups total" -ForegroundColor Green
-        return $allGroups.Values | Sort-Object -Property name
+        return $allGroups.Values | Sort-Object -Property itemOrder
     }
     catch {
         Write-Host "Error fetching process groups: $($_.Exception.Message)" -ForegroundColor Red
@@ -443,7 +445,7 @@ function Show-GroupTree {
         } else {
             $_.parentId -eq $ParentId
         }
-    } | Sort-Object -Property name
+    } | Sort-Object -Property itemOrder
 
     foreach ($group in $filteredGroups) {
         $index = $IndexMap.Count + 1
