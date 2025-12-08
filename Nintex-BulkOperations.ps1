@@ -322,63 +322,50 @@ function Get-NewExpertFromCsvRow {
 # USER AND GROUP SELECTION
 # ============================================================================
 
-function Normalize-GroupData {
+function Get-ChildGroupsRecursive {
     param(
-        [array]$RawGroups
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$ParentUniqueId,
+        [int]$ParentId = $null,
+        [ref]$AllGroups
     )
 
-    $normalizedGroups = @{}
+    try {
+        $url = "$SiteURL/Process/View/GetChildProcessGroupTreeItems?uniqueId=$ParentUniqueId"
+        $response = Invoke-ApiGet -Url $url -Token $Token
 
-    foreach ($rawGroup in $RawGroups) {
-        # Debug: Show properties of first group
-        if ($normalizedGroups.Count -eq 0) {
-            Write-Host "  Sample group properties: $($rawGroup.PSObject.Properties.Name -join ', ')" -ForegroundColor Gray
-        }
+        if ($response -and $response.treeItems) {
+            # Filter for only group items (not processes or documents)
+            $groups = $response.treeItems | Where-Object {
+                $_.itemType -eq "group" -or $_.itemType -eq "documentgroup"
+            }
 
-        # Extract ID (try various property names)
-        $groupId = $null
-        if ($rawGroup.id) { $groupId = $rawGroup.id }
-        elseif ($rawGroup.Id) { $groupId = $rawGroup.Id }
-        elseif ($rawGroup.processGroupId) { $groupId = $rawGroup.processGroupId }
-        elseif ($rawGroup.ProcessGroupId) { $groupId = $rawGroup.ProcessGroupId }
-        elseif ($rawGroup.groupId) { $groupId = $rawGroup.groupId }
+            foreach ($group in $groups) {
+                # Add this group to our collection
+                if (-not $AllGroups.Value.ContainsKey($group.id)) {
+                    $AllGroups.Value[$group.id] = @{
+                        id = $group.id
+                        uniqueId = $group.uniqueId
+                        name = $group.title
+                        parentId = $ParentId
+                        hasChild = $group.hasChild
+                        totalSubgroups = $group.totalSubgroups
+                    }
+                }
 
-        if (-not $groupId) {
-            Write-Host "  Skipping group without ID" -ForegroundColor Yellow
-            continue
-        }
-
-        # Extract other properties
-        $uniqueId = $rawGroup.uniqueId ?? $rawGroup.UniqueId ?? $rawGroup.processGroupUniqueId ?? $rawGroup.ProcessGroupUniqueId ?? $null
-        $name = $rawGroup.name ?? $rawGroup.Name ?? $rawGroup.processGroupName ?? $rawGroup.ProcessGroupName ?? "Group $groupId"
-        $path = $rawGroup.path ?? $rawGroup.Path ?? $rawGroup.processGroupPath ?? $rawGroup.ProcessGroupPath ?? $null
-        $parentId = $rawGroup.parentId ?? $rawGroup.ParentId ?? $rawGroup.parentProcessGroupId ?? $rawGroup.ParentProcessGroupId ?? $null
-
-        $normalizedGroups[$groupId] = @{
-            id = $groupId
-            uniqueId = $uniqueId
-            name = $name
-            path = $path
-            parentId = $parentId
-        }
-    }
-
-    # If we have groups with paths but no parentId set, calculate from paths
-    foreach ($groupId in $normalizedGroups.Keys) {
-        $group = $normalizedGroups[$groupId]
-        if (-not $group.parentId -and $group.path -and $group.path -match '/') {
-            $pathParts = $group.path.Trim('/') -split '/'
-            if ($pathParts.Count -gt 1) {
-                # Parent is the second-to-last part of the path
-                $parentId = [int]$pathParts[$pathParts.Count - 2]
-                if ($normalizedGroups.ContainsKey($parentId)) {
-                    $group.parentId = $parentId
+                # Recursively fetch children if this group has any
+                if ($group.hasChild -and $group.totalSubgroups -gt 0) {
+                    Get-ChildGroupsRecursive -SiteURL $SiteURL -Token $Token `
+                        -ParentUniqueId $group.uniqueId -ParentId $group.id `
+                        -AllGroups $AllGroups
                 }
             }
         }
     }
-
-    return $normalizedGroups.Values | Sort-Object -Property name
+    catch {
+        Write-Host "  Error fetching children for group $ParentUniqueId : $($_.Exception.Message)" -ForegroundColor Yellow
+    }
 }
 
 function Get-ProcessGroups {
@@ -388,84 +375,38 @@ function Get-ProcessGroups {
     )
 
     try {
-        # Try the BFF API endpoint first (most common in modern Nintex PM)
-        Write-Host "Trying BFF API endpoint..." -ForegroundColor Gray
-        $url = "$SiteURL/BFF/Api/ProcessGroups/All"
+        Write-Host "Fetching group tree from Process Manager..." -ForegroundColor Cyan
+
+        # First, we need to get the root group ID
+        # Try getting process list to extract root groups
+        Write-Host "  Getting root groups..." -ForegroundColor Gray
+        $url = "$SiteURL/BFF/Api/Processes/All/List?ListType=0&PageSize=1&PageIndex=0"
         $response = Invoke-ApiGet -Url $url -Token $Token
 
-        if ($response) {
-            # Response might be an array or an object with nested groups
-            $groupsArray = $null
+        if (-not $response -or -not $response.processes -or $response.processes.Count -eq 0) {
+            Write-Host "  Could not find any processes to extract root group" -ForegroundColor Yellow
+            return @()
+        }
 
-            if ($response -is [Array]) {
-                Write-Host "Response is an array with $($response.Count) items" -ForegroundColor Gray
-                $groupsArray = $response
-            }
-            elseif ($response.groups) {
-                Write-Host "Response has 'groups' property with $($response.groups.Count) items" -ForegroundColor Gray
-                $groupsArray = $response.groups
-            }
-            elseif ($response.processGroups) {
-                Write-Host "Response has 'processGroups' property with $($response.processGroups.Count) items" -ForegroundColor Gray
-                $groupsArray = $response.processGroups
-            }
-            elseif ($response.items) {
-                Write-Host "Response has 'items' property with $($response.items.Count) items" -ForegroundColor Gray
-                $groupsArray = $response.items
-            }
-            else {
-                Write-Host "Response is a single object, checking properties..." -ForegroundColor Gray
-                Write-Host "  Properties: $($response.PSObject.Properties.Name -join ', ')" -ForegroundColor Gray
-                # Treat as a single group
-                $groupsArray = @($response)
-            }
+        # Get a sample process to find the root group structure
+        $sampleProcess = $response.processes[0]
+        Write-Host "  Sample process: $($sampleProcess.name)" -ForegroundColor Gray
 
-            if ($groupsArray -and $groupsArray.Count -gt 0) {
-                Write-Host "Found $($groupsArray.Count) groups from BFF API" -ForegroundColor Green
-                $normalized = Normalize-GroupData -RawGroups $groupsArray
-                Write-Host "Normalized to $($normalized.Count) groups" -ForegroundColor Green
-                return $normalized
+        # Extract root group ID from the process path
+        # Path format is like "/661/" for root or "/661/663/" for nested
+        $rootGroupId = $null
+        $rootUniqueId = $null
+
+        if ($sampleProcess.processGroupPath) {
+            $pathParts = $sampleProcess.processGroupPath.Trim('/') -split '/'
+            if ($pathParts.Count -gt 0) {
+                $rootGroupId = [int]$pathParts[0]
+                Write-Host "  Found root group ID: $rootGroupId" -ForegroundColor Gray
             }
         }
 
-        # Fallback to v1 API endpoint
-        Write-Host "Trying v1 API endpoint..." -ForegroundColor Gray
-        $url = "$SiteURL/Api/v1/ProcessGroups"
-        $response = Invoke-ApiGet -Url $url -Token $Token
-
-        if ($response) {
-            # Response might be an array or an object with nested groups
-            $groupsArray = $null
-
-            if ($response -is [Array]) {
-                Write-Host "Response is an array with $($response.Count) items" -ForegroundColor Gray
-                $groupsArray = $response
-            }
-            elseif ($response.groups) {
-                Write-Host "Response has 'groups' property" -ForegroundColor Gray
-                $groupsArray = $response.groups
-            }
-            elseif ($response.processGroups) {
-                Write-Host "Response has 'processGroups' property" -ForegroundColor Gray
-                $groupsArray = $response.processGroups
-            }
-            else {
-                Write-Host "Response is a single object" -ForegroundColor Gray
-                $groupsArray = @($response)
-            }
-
-            if ($groupsArray -and $groupsArray.Count -gt 0) {
-                Write-Host "Found groups from v1 API" -ForegroundColor Green
-                $normalized = Normalize-GroupData -RawGroups $groupsArray
-                Write-Host "Normalized to $($normalized.Count) groups" -ForegroundColor Green
-                return $normalized
-            }
-        }
-
-        # If both fail, we'll build the tree from process data
-        Write-Host "Building group tree from process data..." -ForegroundColor Yellow
-
-        # Get all processes and extract unique groups
+        # Now fetch all processes to get all root groups
+        Write-Host "  Fetching processes to identify root groups..." -ForegroundColor Gray
         $allProcesses = @()
         $pageSize = 200
         $pageIndex = 0
@@ -476,80 +417,58 @@ function Get-ProcessGroups {
 
             if ($processResponse -and $processResponse.processes) {
                 $allProcesses += $processResponse.processes
-                Write-Host "  Fetched page $($pageIndex + 1) - $($processResponse.processes.Count) processes" -ForegroundColor Gray
             }
             $pageIndex++
         } while ($processResponse -and $processResponse.processes -and $processResponse.processes.Count -eq $pageSize)
 
-        Write-Host "Total processes fetched: $($allProcesses.Count)" -ForegroundColor Gray
+        Write-Host "  Fetched $($allProcesses.Count) processes" -ForegroundColor Gray
 
-        if ($allProcesses.Count -eq 0) {
-            Write-Host "No processes found to extract groups from" -ForegroundColor Yellow
-            return @()
-        }
-
-        # Debug: Show sample process structure
-        if ($allProcesses.Count -gt 0) {
-            $sampleProcess = $allProcesses[0]
-            Write-Host "Sample process properties: $($sampleProcess.PSObject.Properties.Name -join ', ')" -ForegroundColor Gray
-        }
-
-        # Extract unique groups from processes
-        $groups = @{}
+        # Extract unique root groups (groups at the first level)
+        $rootGroups = @{}
         foreach ($process in $allProcesses) {
-            # Try different possible property names for group ID
-            $groupId = $null
-            if ($process.processGroupId) { $groupId = $process.processGroupId }
-            elseif ($process.ProcessGroupId) { $groupId = $process.ProcessGroupId }
-            elseif ($process.groupId) { $groupId = $process.groupId }
+            if ($process.processGroupPath) {
+                $pathParts = $process.processGroupPath.Trim('/') -split '/'
+                if ($pathParts.Count -gt 0) {
+                    $rootId = [int]$pathParts[0]
+                    if (-not $rootGroups.ContainsKey($rootId)) {
+                        # Try to find a process that belongs directly to this root group
+                        $rootProcess = $allProcesses | Where-Object {
+                            $_.processGroupId -eq $rootId
+                        } | Select-Object -First 1
 
-            if ($groupId -and -not $groups.ContainsKey($groupId)) {
-                # Try different possible property names
-                $groupName = $null
-                if ($process.processGroupName) { $groupName = $process.processGroupName }
-                elseif ($process.ProcessGroupName) { $groupName = $process.ProcessGroupName }
-                elseif ($process.groupName) { $groupName = $process.groupName }
-
-                $groupPath = $null
-                if ($process.processGroupPath) { $groupPath = $process.processGroupPath }
-                elseif ($process.ProcessGroupPath) { $groupPath = $process.ProcessGroupPath }
-                elseif ($process.groupPath) { $groupPath = $process.groupPath }
-
-                $uniqueId = $null
-                if ($process.processGroupUniqueId) { $uniqueId = $process.processGroupUniqueId }
-                elseif ($process.ProcessGroupUniqueId) { $uniqueId = $process.ProcessGroupUniqueId }
-                elseif ($process.groupUniqueId) { $uniqueId = $process.groupUniqueId }
-
-                $groups[$groupId] = @{
-                    id = $groupId
-                    uniqueId = $uniqueId
-                    name = $groupName
-                    path = $groupPath
-                    parentId = $null
-                }
-            }
-        }
-
-        Write-Host "Extracted $($groups.Count) unique groups" -ForegroundColor Gray
-
-        # Calculate parent relationships from paths
-        foreach ($groupId in $groups.Keys) {
-            $group = $groups[$groupId]
-            if ($group.path -and $group.path -match '/') {
-                $pathParts = $group.path.Trim('/') -split '/'
-                if ($pathParts.Count -gt 1) {
-                    # Parent is the second-to-last part of the path
-                    $parentId = [int]$pathParts[$pathParts.Count - 2]
-                    if ($groups.ContainsKey($parentId)) {
-                        $group.parentId = $parentId
+                        if ($rootProcess) {
+                            $rootGroups[$rootId] = @{
+                                id = $rootId
+                                uniqueId = $rootProcess.processGroupUniqueId
+                                name = $rootProcess.processGroupName
+                                parentId = $null
+                            }
+                        }
                     }
                 }
             }
         }
 
-        $result = $groups.Values | Sort-Object -Property name
-        Write-Host "Returning $($result.Count) groups" -ForegroundColor Green
-        return $result
+        Write-Host "  Found $($rootGroups.Count) root groups" -ForegroundColor Green
+
+        # Now recursively fetch the full tree for each root group
+        $allGroups = @{}
+
+        foreach ($rootGroupId in $rootGroups.Keys) {
+            $rootGroup = $rootGroups[$rootGroupId]
+            Write-Host "  Fetching tree for: $($rootGroup.name)..." -ForegroundColor Gray
+
+            # Add root group
+            $allGroups[$rootGroup.id] = $rootGroup
+
+            # Recursively fetch children
+            Get-ChildGroupsRecursive -SiteURL $SiteURL -Token $Token `
+                -ParentUniqueId $rootGroup.uniqueId -ParentId $null `
+                -AllGroups ([ref]$allGroups)
+        }
+
+        Write-Host "Successfully fetched $($allGroups.Count) groups total" -ForegroundColor Green
+        return $allGroups.Values | Sort-Object -Property name
     }
     catch {
         Write-Host "Error fetching process groups: $($_.Exception.Message)" -ForegroundColor Red
