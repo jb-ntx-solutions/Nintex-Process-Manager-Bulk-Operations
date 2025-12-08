@@ -322,25 +322,195 @@ function Get-NewExpertFromCsvRow {
 # USER AND GROUP SELECTION
 # ============================================================================
 
+function Get-ProcessGroups {
+    param(
+        [string]$SiteURL,
+        [string]$Token
+    )
+
+    try {
+        # Try the BFF API endpoint first (most common in modern Nintex PM)
+        $url = "$SiteURL/BFF/Api/ProcessGroups/All"
+        $response = Invoke-ApiGet -Url $url -Token $Token
+
+        if ($response) {
+            return $response
+        }
+
+        # Fallback to v1 API endpoint
+        $url = "$SiteURL/Api/v1/ProcessGroups"
+        $response = Invoke-ApiGet -Url $url -Token $Token
+
+        if ($response) {
+            return $response
+        }
+
+        # If both fail, we'll build the tree from process data
+        Write-Host "Unable to fetch group tree from API. Fetching from process data..." -ForegroundColor Yellow
+
+        # Get all processes and extract unique groups
+        $allProcesses = @()
+        $pageSize = 200
+        $pageIndex = 0
+
+        do {
+            $url = "$SiteURL/BFF/Api/Processes/All/List?ListType=0&PageSize=$pageSize&PageIndex=$pageIndex"
+            $processResponse = Invoke-ApiGet -Url $url -Token $Token
+
+            if ($processResponse -and $processResponse.processes) {
+                $allProcesses += $processResponse.processes
+            }
+            $pageIndex++
+        } while ($processResponse -and $processResponse.processes -and $processResponse.processes.Count -eq $pageSize)
+
+        # Extract unique groups from processes
+        $groups = @{}
+        foreach ($process in $allProcesses) {
+            if ($process.processGroupId -and -not $groups.ContainsKey($process.processGroupId)) {
+                $groups[$process.processGroupId] = @{
+                    id = $process.processGroupId
+                    uniqueId = $process.processGroupUniqueId
+                    name = $process.processGroupName
+                    path = $process.processGroupPath
+                    parentId = $null
+                }
+            }
+        }
+
+        # Calculate parent relationships from paths
+        foreach ($groupId in $groups.Keys) {
+            $group = $groups[$groupId]
+            if ($group.path -and $group.path -match '^/(\d+)(/(\d+))?') {
+                $pathParts = $group.path.Trim('/') -split '/'
+                if ($pathParts.Count -gt 1) {
+                    $parentId = [int]$pathParts[$pathParts.Count - 2]
+                    $group.parentId = $parentId
+                }
+            }
+        }
+
+        return $groups.Values | Sort-Object -Property name
+    }
+    catch {
+        Write-Host "Error fetching process groups: $($_.Exception.Message)" -ForegroundColor Red
+        return @()
+    }
+}
+
+function Show-GroupTree {
+    param(
+        [array]$Groups,
+        [int]$ParentId = $null,
+        [int]$Level = 0,
+        [hashtable]$IndexMap
+    )
+
+    $indent = "  " * $Level
+    $filteredGroups = $Groups | Where-Object {
+        if ($ParentId -eq $null) {
+            $_.parentId -eq $null -or $_.parentId -eq 0
+        } else {
+            $_.parentId -eq $ParentId
+        }
+    } | Sort-Object -Property name
+
+    foreach ($group in $filteredGroups) {
+        $index = $IndexMap.Count + 1
+        $IndexMap[$index] = $group
+
+        $groupName = if ($group.name) { $group.name } else { "Group $($group.id)" }
+        $uniqueIdDisplay = if ($group.uniqueId) { " (ID: $($group.uniqueId))" } else { "" }
+
+        Write-Host "$indent[$index] $groupName$uniqueIdDisplay" -ForegroundColor Cyan
+
+        # Recursively show children
+        Show-GroupTree -Groups $Groups -ParentId $group.id -Level ($Level + 1) -IndexMap $IndexMap
+    }
+}
+
 function Select-ProcessGroup {
     param(
         [string]$SiteURL,
         [string]$Token,
-        [string]$Prompt = "Enter Process Group ID"
+        [string]$Prompt = "Select Process Group"
     )
 
     Write-Host "`n$Prompt" -ForegroundColor Cyan
-    Write-Host "You can find the Group ID in the URL when viewing a group in Process Manager" -ForegroundColor Gray
-    Write-Host "Example: .../ProcessGroup/View/123 - the ID is 123" -ForegroundColor Gray
+    Write-Host "======================================" -ForegroundColor Gray
+    Write-Host "[1] Select from group tree" -ForegroundColor White
+    Write-Host "[2] Enter Group ID manually" -ForegroundColor White
+    Write-Host "======================================" -ForegroundColor Gray
 
-    $groupId = Read-Host "Group ID"
+    $choice = Read-Host "Choose an option (1-2)"
 
-    if ($groupId -match '^\d+$') {
-        return [int]$groupId
-    } else {
-        Write-Host "Invalid Group ID. Must be a number." -ForegroundColor Red
-        return -1
+    if ($choice -eq "1") {
+        # Show group tree picker
+        Write-Host "`nFetching process groups..." -ForegroundColor Cyan
+        $groups = Get-ProcessGroups -SiteURL $SiteURL -Token $Token
+
+        if (-not $groups -or $groups.Count -eq 0) {
+            Write-Host "No groups found. Please enter Group ID manually." -ForegroundColor Yellow
+            $choice = "2"
+        } else {
+            Write-Host "`nAvailable Process Groups:" -ForegroundColor Green
+            Write-Host "======================================" -ForegroundColor Gray
+
+            $indexMap = @{}
+            Show-GroupTree -Groups $groups -IndexMap $indexMap
+
+            Write-Host "======================================" -ForegroundColor Gray
+            $selection = Read-Host "`nEnter the number of the group you want to select"
+
+            if ($indexMap.ContainsKey([int]$selection)) {
+                $selectedGroup = $indexMap[[int]$selection]
+                $groupName = if ($selectedGroup.name) { $selectedGroup.name } else { "Group $($selectedGroup.id)" }
+                Write-Host "Selected: $groupName" -ForegroundColor Green
+                return $selectedGroup.id
+            } else {
+                Write-Host "Invalid selection." -ForegroundColor Red
+                return -1
+            }
+        }
     }
+
+    if ($choice -eq "2") {
+        # Manual entry
+        Write-Host "`nEnter Process Group ID" -ForegroundColor Cyan
+        Write-Host "You can find the Group ID in the URL when viewing a group in Process Manager" -ForegroundColor Gray
+        Write-Host "Examples:" -ForegroundColor Gray
+        Write-Host "  - Numeric ID: .../ProcessGroup/View/123 - enter: 123" -ForegroundColor Gray
+        Write-Host "  - GUID: .../ProcessGroup/View/a1b2c3d4-... - enter: a1b2c3d4-e5f6-7890-abcd-ef1234567890" -ForegroundColor Gray
+
+        $groupId = Read-Host "`nGroup ID"
+
+        # Check if it's a numeric ID
+        if ($groupId -match '^\d+$') {
+            return [int]$groupId
+        }
+        # Check if it's a GUID
+        elseif ($groupId -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+            # Need to resolve GUID to numeric ID
+            Write-Host "Resolving GUID to numeric ID..." -ForegroundColor Cyan
+
+            $groups = Get-ProcessGroups -SiteURL $SiteURL -Token $Token
+            $matchedGroup = $groups | Where-Object { $_.uniqueId -eq $groupId }
+
+            if ($matchedGroup) {
+                Write-Host "Found group: $($matchedGroup.name)" -ForegroundColor Green
+                return $matchedGroup.id
+            } else {
+                Write-Host "Could not find group with GUID: $groupId" -ForegroundColor Red
+                return -1
+            }
+        }
+        else {
+            Write-Host "Invalid Group ID format. Must be a number or a GUID." -ForegroundColor Red
+            return -1
+        }
+    }
+
+    Write-Host "Invalid choice." -ForegroundColor Red
+    return -1
 }
 
 function Search-User {
