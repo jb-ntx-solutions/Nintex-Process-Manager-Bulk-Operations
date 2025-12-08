@@ -322,6 +322,65 @@ function Get-NewExpertFromCsvRow {
 # USER AND GROUP SELECTION
 # ============================================================================
 
+function Normalize-GroupData {
+    param(
+        [array]$RawGroups
+    )
+
+    $normalizedGroups = @{}
+
+    foreach ($rawGroup in $RawGroups) {
+        # Debug: Show properties of first group
+        if ($normalizedGroups.Count -eq 0) {
+            Write-Host "  Sample group properties: $($rawGroup.PSObject.Properties.Name -join ', ')" -ForegroundColor Gray
+        }
+
+        # Extract ID (try various property names)
+        $groupId = $null
+        if ($rawGroup.id) { $groupId = $rawGroup.id }
+        elseif ($rawGroup.Id) { $groupId = $rawGroup.Id }
+        elseif ($rawGroup.processGroupId) { $groupId = $rawGroup.processGroupId }
+        elseif ($rawGroup.ProcessGroupId) { $groupId = $rawGroup.ProcessGroupId }
+        elseif ($rawGroup.groupId) { $groupId = $rawGroup.groupId }
+
+        if (-not $groupId) {
+            Write-Host "  Skipping group without ID" -ForegroundColor Yellow
+            continue
+        }
+
+        # Extract other properties
+        $uniqueId = $rawGroup.uniqueId ?? $rawGroup.UniqueId ?? $rawGroup.processGroupUniqueId ?? $rawGroup.ProcessGroupUniqueId ?? $null
+        $name = $rawGroup.name ?? $rawGroup.Name ?? $rawGroup.processGroupName ?? $rawGroup.ProcessGroupName ?? "Group $groupId"
+        $path = $rawGroup.path ?? $rawGroup.Path ?? $rawGroup.processGroupPath ?? $rawGroup.ProcessGroupPath ?? $null
+        $parentId = $rawGroup.parentId ?? $rawGroup.ParentId ?? $rawGroup.parentProcessGroupId ?? $rawGroup.ParentProcessGroupId ?? $null
+
+        $normalizedGroups[$groupId] = @{
+            id = $groupId
+            uniqueId = $uniqueId
+            name = $name
+            path = $path
+            parentId = $parentId
+        }
+    }
+
+    # If we have groups with paths but no parentId set, calculate from paths
+    foreach ($groupId in $normalizedGroups.Keys) {
+        $group = $normalizedGroups[$groupId]
+        if (-not $group.parentId -and $group.path -and $group.path -match '/') {
+            $pathParts = $group.path.Trim('/') -split '/'
+            if ($pathParts.Count -gt 1) {
+                # Parent is the second-to-last part of the path
+                $parentId = [int]$pathParts[$pathParts.Count - 2]
+                if ($normalizedGroups.ContainsKey($parentId)) {
+                    $group.parentId = $parentId
+                }
+            }
+        }
+    }
+
+    return $normalizedGroups.Values | Sort-Object -Property name
+}
+
 function Get-ProcessGroups {
     param(
         [string]$SiteURL,
@@ -335,8 +394,38 @@ function Get-ProcessGroups {
         $response = Invoke-ApiGet -Url $url -Token $Token
 
         if ($response) {
-            Write-Host "Found $($response.Count) groups from BFF API" -ForegroundColor Green
-            return $response
+            # Response might be an array or an object with nested groups
+            $groupsArray = $null
+
+            if ($response -is [Array]) {
+                Write-Host "Response is an array with $($response.Count) items" -ForegroundColor Gray
+                $groupsArray = $response
+            }
+            elseif ($response.groups) {
+                Write-Host "Response has 'groups' property with $($response.groups.Count) items" -ForegroundColor Gray
+                $groupsArray = $response.groups
+            }
+            elseif ($response.processGroups) {
+                Write-Host "Response has 'processGroups' property with $($response.processGroups.Count) items" -ForegroundColor Gray
+                $groupsArray = $response.processGroups
+            }
+            elseif ($response.items) {
+                Write-Host "Response has 'items' property with $($response.items.Count) items" -ForegroundColor Gray
+                $groupsArray = $response.items
+            }
+            else {
+                Write-Host "Response is a single object, checking properties..." -ForegroundColor Gray
+                Write-Host "  Properties: $($response.PSObject.Properties.Name -join ', ')" -ForegroundColor Gray
+                # Treat as a single group
+                $groupsArray = @($response)
+            }
+
+            if ($groupsArray -and $groupsArray.Count -gt 0) {
+                Write-Host "Found $($groupsArray.Count) groups from BFF API" -ForegroundColor Green
+                $normalized = Normalize-GroupData -RawGroups $groupsArray
+                Write-Host "Normalized to $($normalized.Count) groups" -ForegroundColor Green
+                return $normalized
+            }
         }
 
         # Fallback to v1 API endpoint
@@ -345,8 +434,32 @@ function Get-ProcessGroups {
         $response = Invoke-ApiGet -Url $url -Token $Token
 
         if ($response) {
-            Write-Host "Found groups from v1 API" -ForegroundColor Green
-            return $response
+            # Response might be an array or an object with nested groups
+            $groupsArray = $null
+
+            if ($response -is [Array]) {
+                Write-Host "Response is an array with $($response.Count) items" -ForegroundColor Gray
+                $groupsArray = $response
+            }
+            elseif ($response.groups) {
+                Write-Host "Response has 'groups' property" -ForegroundColor Gray
+                $groupsArray = $response.groups
+            }
+            elseif ($response.processGroups) {
+                Write-Host "Response has 'processGroups' property" -ForegroundColor Gray
+                $groupsArray = $response.processGroups
+            }
+            else {
+                Write-Host "Response is a single object" -ForegroundColor Gray
+                $groupsArray = @($response)
+            }
+
+            if ($groupsArray -and $groupsArray.Count -gt 0) {
+                Write-Host "Found groups from v1 API" -ForegroundColor Green
+                $normalized = Normalize-GroupData -RawGroups $groupsArray
+                Write-Host "Normalized to $($normalized.Count) groups" -ForegroundColor Green
+                return $normalized
+            }
         }
 
         # If both fail, we'll build the tree from process data
