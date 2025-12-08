@@ -432,7 +432,7 @@ function Get-ProcessGroups {
             # Recursively fetch children if this group has any
             if ($rootGroup.hasChild -and $rootGroup.totalSubgroups -gt 0) {
                 Get-ChildGroupsRecursive -SiteURL $SiteURL -Token $Token `
-                    -ParentUniqueId $rootGroup.uniqueId -ParentId $null `
+                    -ParentUniqueId $rootGroup.uniqueId -ParentId $rootGroup.id `
                     -AllGroups ([ref]$allGroups)
             }
         }
