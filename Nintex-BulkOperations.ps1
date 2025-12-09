@@ -1288,6 +1288,97 @@ function Invoke-BulkUpdateOwnership {
 # MODE 5: BULK DELETE PROCESSES
 # ============================================================================
 
+function Get-ArchivedProcessDetails {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [array]$ProcessUniqueIds
+    )
+
+    Write-Host "  Fetching archived process details using mobile API..." -ForegroundColor Gray
+
+    $processDetails = @()
+
+    # The mobile API can handle multiple processUniqueIds in a single request
+    # However, we'll batch them to avoid URL length limits
+    $batchSize = 10
+    for ($i = 0; $i -lt $ProcessUniqueIds.Count; $i += $batchSize) {
+        $batch = $ProcessUniqueIds[$i..[Math]::Min($i + $batchSize - 1, $ProcessUniqueIds.Count - 1)]
+        $uniqueIdsParam = $batch -join ","
+
+        $url = "$SiteURL/mobile/api/v1/processes?processUniqueIds=$uniqueIdsParam"
+        $response = Invoke-ApiGet -Url $url -Token $Token
+
+        if ($response -and $response.data) {
+            $processDetails += $response.data
+        }
+    }
+
+    return $processDetails
+}
+
+function Get-ArchivedProcessesWithReferences {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [array]$ProcessIdsToDelete,
+        [array]$ArchivedProcesses
+    )
+
+    Write-Host "Checking archived processes for references using mobile API..." -ForegroundColor Cyan
+
+    $referencingArchivedProcesses = @()
+    $processUniqueIdSet = @{}
+
+    # First, get the unique IDs for the processes to be deleted
+    Write-Host "  Getting details for processes to be deleted..." -ForegroundColor Gray
+    foreach ($processId in $ProcessIdsToDelete) {
+        $getUrl = "$SiteURL/Api/v1/Processes/$processId"
+        $process = Invoke-ApiGet -Url $getUrl -Token $Token
+        if ($process) {
+            $processUniqueIdSet[$process.uniqueId] = $processId
+        }
+    }
+
+    # Get archived process unique IDs
+    $archivedUniqueIds = $ArchivedProcesses | ForEach-Object { $_.processUniqueId }
+
+    # Fetch details for all archived processes using mobile API
+    $archivedProcessDetails = Get-ArchivedProcessDetails -SiteURL $SiteURL -Token $Token -ProcessUniqueIds $archivedUniqueIds
+
+    Write-Host "  Scanning $($archivedProcessDetails.Count) archived processes for references..." -ForegroundColor Gray
+
+    foreach ($archivedProcess in $archivedProcessDetails) {
+        # Convert to JSON to search for references
+        $processJson = $archivedProcess | ConvertTo-Json -Depth 20
+
+        # Check for references to any of the processes being deleted
+        $hasReferences = $false
+        $referencedProcessIds = @()
+
+        foreach ($uniqueId in $processUniqueIdSet.Keys) {
+            if ($processJson -match $uniqueId) {
+                $hasReferences = $true
+                $referencedProcessIds += $processUniqueIdSet[$uniqueId]
+                Write-Host "    Found: Archived process '$($archivedProcess.ProcessModel.Name)' (ID: $($archivedProcess.ProcessModel.Id)) references process with uniqueId: $uniqueId" -ForegroundColor Yellow
+            }
+        }
+
+        if ($hasReferences) {
+            $referencingArchivedProcesses += [PSCustomObject]@{
+                ProcessId = $archivedProcess.ProcessModel.Id
+                ProcessUniqueId = $archivedProcess.ProcessUniqueId
+                ProcessName = $archivedProcess.ProcessModel.Name
+                ReferencedProcessIds = $referencedProcessIds
+            }
+        }
+    }
+
+    Write-Host "  Found $($referencingArchivedProcesses.Count) archived processes with references to processes being deleted" -ForegroundColor $(if ($referencingArchivedProcesses.Count -eq 0) { "Green" } else { "Yellow" })
+
+    return $referencingArchivedProcesses
+}
+
 function Get-ProcessReferences {
     param(
         [string]$SiteURL,
@@ -1422,8 +1513,8 @@ function Invoke-BulkDeleteProcesses {
         return
     }
 
-    # Step 2: Create temporary group and restore all archived processes
-    Write-Host "`n=== PHASE 2: Creating Temporary Group and Restoring Archives ===" -ForegroundColor Cyan
+    # Step 2: Create temporary group
+    Write-Host "`n=== PHASE 2: Creating Temporary Group ===" -ForegroundColor Cyan
 
     # Create temp group automatically
     $tempGroup = New-ProcessGroup -SiteURL $SiteURL -Token $Token -GroupName $TempGroupName
@@ -1437,44 +1528,58 @@ function Invoke-BulkDeleteProcesses {
     $tempGroupUniqueId = $tempGroup.uniqueId
     Write-Host "Temporary group created (ID: $tempGroupId, uniqueId: $tempGroupUniqueId)" -ForegroundColor Green
 
-    # Get all archived processes
+    # Step 3: Check archived processes for references using mobile API
+    Write-Host "`n=== PHASE 3: Checking Archived Processes for References ===" -ForegroundColor Cyan
+
+    # Get all archived processes (lightweight - just IDs and names)
     $archivedProcesses = Get-ArchivedProcesses -SiteURL $SiteURL -Token $Token
     Write-Host "Found $($archivedProcesses.Count) archived processes" -ForegroundColor Green
 
-    # Restore all to temp group
+    # Use mobile API to check which archived processes have references to processes being deleted
+    $archivedProcessesWithReferences = Get-ArchivedProcessesWithReferences -SiteURL $SiteURL -Token $Token -ProcessIdsToDelete $processesToDelete -ArchivedProcesses $archivedProcesses
+
+    # Step 4: Restore only archived processes that have references
+    Write-Host "`n=== PHASE 4: Restoring Archived Processes with References ===" -ForegroundColor Cyan
+
     $restoredProcessIds = @()
-    foreach ($archivedProc in $archivedProcesses) {
-        Write-Host "Restoring archived process '$($archivedProc.processName)' (uniqueId: $($archivedProc.processUniqueId)) to temp group" -ForegroundColor White
+    if ($archivedProcessesWithReferences.Count -gt 0) {
+        Write-Host "Restoring $($archivedProcessesWithReferences.Count) archived processes that contain references..." -ForegroundColor Cyan
 
-        $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess"
-        $restoreBody = @{
-            processUniqueId = $archivedProc.processUniqueId
-            processGroupId = $tempGroupId.ToString()
-        } | ConvertTo-Json
+        foreach ($archivedProc in $archivedProcessesWithReferences) {
+            Write-Host "Restoring archived process '$($archivedProc.ProcessName)' (ID: $($archivedProc.ProcessId), uniqueId: $($archivedProc.ProcessUniqueId)) to temp group" -ForegroundColor White
 
-        Write-Host "  DEBUG: Restore body: $restoreBody" -ForegroundColor Cyan
+            $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess"
+            $restoreBody = @{
+                processUniqueId = $archivedProc.ProcessUniqueId
+                processGroupId = $tempGroupId.ToString()
+            } | ConvertTo-Json
 
-        $result = Invoke-ApiPost -Url $restoreUrl -Token $Token -Body $restoreBody
-        if ($result) {
-            Write-Host "  Successfully restored" -ForegroundColor Green
-            $restoredProcessIds += $archivedProc.processId
-        } else {
-            Write-Host "  Failed to restore" -ForegroundColor Red
+            Write-Host "  DEBUG: Restore body: $restoreBody" -ForegroundColor Cyan
+
+            $result = Invoke-ApiPost -Url $restoreUrl -Token $Token -Body $restoreBody
+            if ($result) {
+                Write-Host "  Successfully restored" -ForegroundColor Green
+                $restoredProcessIds += $archivedProc.ProcessId
+            } else {
+                Write-Host "  Failed to restore" -ForegroundColor Red
+            }
         }
+
+        Write-Host "Restored $($restoredProcessIds.Count) processes to temporary group" -ForegroundColor Green
+    } else {
+        Write-Host "No archived processes need to be restored (no references found)" -ForegroundColor Green
     }
 
-    Write-Host "Restored $($restoredProcessIds.Count) processes to temporary group" -ForegroundColor Green
-
-    # Step 3: Get all processes and find references
-    Write-Host "`n=== PHASE 3: Scanning for References ===" -ForegroundColor Cyan
+    # Step 5: Get all active processes and find references
+    Write-Host "`n=== PHASE 5: Scanning Active Processes for References ===" -ForegroundColor Cyan
 
     $allProcesses = Get-ProcessesFromGroup -SiteURL $SiteURL -Token $Token -GroupID 0 -IncludeSubgroups $true
-    Write-Host "Retrieved $($allProcesses.Count) total processes" -ForegroundColor Green
+    Write-Host "Retrieved $($allProcesses.Count) total active processes" -ForegroundColor Green
 
     $references = Get-ProcessReferences -SiteURL $SiteURL -Token $Token -ProcessIdsToDelete $processesToDelete -AllProcesses $allProcesses
 
     if ($references.Count -gt 0) {
-        Write-Host "`nFound $($references.Count) references" -ForegroundColor Yellow
+        Write-Host "`nFound $($references.Count) references in active processes" -ForegroundColor Yellow
         $removeRefs = Read-Host "Do you want to attempt to remove these references? (Y/N)"
 
         if ($removeRefs -eq 'Y') {
@@ -1483,11 +1588,11 @@ function Invoke-BulkDeleteProcesses {
             Write-Host "Warning: Proceeding without removing references may cause issues" -ForegroundColor Yellow
         }
     } else {
-        Write-Host "No references found" -ForegroundColor Green
+        Write-Host "No references found in active processes" -ForegroundColor Green
     }
 
-    # Step 4: Update ownership to current user
-    Write-Host "`n=== PHASE 4: Updating Ownership ===" -ForegroundColor Cyan
+    # Step 6: Update ownership to current user
+    Write-Host "`n=== PHASE 6: Updating Ownership ===" -ForegroundColor Cyan
 
     foreach ($processId in $processesToDelete) {
         Write-Host "Updating ownership of Process $processId to $CurrentUsername" -ForegroundColor White
@@ -1504,8 +1609,8 @@ function Invoke-BulkDeleteProcesses {
         }
     }
 
-    # Step 5: Archive processes
-    Write-Host "`n=== PHASE 5: Archiving Processes ===" -ForegroundColor Cyan
+    # Step 7: Archive processes
+    Write-Host "`n=== PHASE 7: Archiving Processes ===" -ForegroundColor Cyan
 
     $confirm = Read-Host "Ready to archive processes. Continue? (Y/N)"
     if ($confirm -ne 'Y') {
@@ -1520,8 +1625,8 @@ function Invoke-BulkDeleteProcesses {
         Invoke-ApiPost -Url $archiveUrl -Token $Token | Out-Null
     }
 
-    # Step 6: Delete processes
-    Write-Host "`n=== PHASE 6: Deleting Processes ===" -ForegroundColor Cyan
+    # Step 8: Delete processes
+    Write-Host "`n=== PHASE 8: Deleting Processes ===" -ForegroundColor Cyan
 
     $confirm = Read-Host "Ready to PERMANENTLY DELETE processes. Type 'DELETE' to confirm"
     if ($confirm -ne 'DELETE') {
@@ -1552,8 +1657,8 @@ function Invoke-BulkDeleteProcesses {
         }
     }
 
-    # Step 7: Re-archive previously archived processes
-    Write-Host "`n=== PHASE 7: Re-archiving Previously Archived Processes ===" -ForegroundColor Cyan
+    # Step 9: Re-archive temporarily restored archived processes
+    Write-Host "`n=== PHASE 9: Re-archiving Temporarily Restored Processes ===" -ForegroundColor Cyan
 
     foreach ($processId in $restoredProcessIds) {
         # Skip if this process was deleted
@@ -1567,8 +1672,8 @@ function Invoke-BulkDeleteProcesses {
         Invoke-ApiPost -Url $archiveUrl -Token $Token | Out-Null
     }
 
-    # Step 8: Clean up temp group
-    Write-Host "`n=== PHASE 8: Cleanup ===" -ForegroundColor Cyan
+    # Step 10: Clean up temp group
+    Write-Host "`n=== PHASE 10: Cleanup ===" -ForegroundColor Cyan
     Write-Host "You should manually delete the temporary group (ID: $tempGroupId) if it's empty" -ForegroundColor Yellow
 
     # Save results
