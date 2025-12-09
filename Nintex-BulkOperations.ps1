@@ -220,6 +220,8 @@ function Get-ArchivedProcesses {
         [int]$GroupID = -1
     )
 
+    Write-Host "  Fetching archived processes..." -ForegroundColor Gray
+
     $allProcesses = @()
     $pageSize = 200
     $page = 1
@@ -228,20 +230,23 @@ function Get-ArchivedProcesses {
         $url = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$pageSize&ListType=7"
         $response = Invoke-ApiGet -Url $url -Token $Token
 
-        if ($response -and $response.processes) {
+        if ($response -and $response.items) {
+            Write-Host "    Page ${page}: Found $($response.items.Count) archived processes" -ForegroundColor Gray
+
             if ($GroupID -gt 0) {
-                $groupProcesses = $response.processes | Where-Object {
-                    $_.processGroupId -eq $GroupID
+                $groupProcesses = $response.items | Where-Object {
+                    $_.groupId -eq $GroupID
                 }
                 $allProcesses += $groupProcesses
             } else {
-                $allProcesses += $response.processes
+                $allProcesses += $response.items
             }
         }
 
         $page++
-    } while ($response -and $response.processes -and $response.processes.Count -eq $pageSize)
+    } while ($response -and $response.items -and $response.items.Count -eq $pageSize)
 
+    Write-Host "  Total archived processes: $($allProcesses.Count)" -ForegroundColor Gray
     return $allProcesses
 }
 
