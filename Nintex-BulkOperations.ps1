@@ -178,7 +178,7 @@ function Get-ProcessesFromGroup {
         }
 
         if ($response -and $response.processes) {
-            Write-Host "    Page $page: Fetched $($response.processes.Count) processes" -ForegroundColor Gray
+            Write-Host "    Page ${page}: Fetched $($response.processes.Count) processes" -ForegroundColor Gray
 
             # Debug: Show sample process properties on first page
             if ($page -eq 1 -and $response.processes.Count -gt 0) {
