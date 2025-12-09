@@ -164,10 +164,10 @@ function Get-ProcessesFromGroup {
 
     $allProcesses = @()
     $pageSize = 200
-    $pageIndex = 0
+    $page = 1
 
     do {
-        $url = "$SiteURL/BFF/Api/Processes/All/List?ListType=0&PageSize=$pageSize&PageIndex=$pageIndex"
+        $url = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$pageSize"
         Write-Host "    DEBUG: Calling API: $url" -ForegroundColor Cyan
         $response = Invoke-ApiGet -Url $url -Token $Token
 
@@ -178,10 +178,10 @@ function Get-ProcessesFromGroup {
         }
 
         if ($response -and $response.processes) {
-            Write-Host "    Page $($pageIndex + 1): Fetched $($response.processes.Count) processes" -ForegroundColor Gray
+            Write-Host "    Page $page: Fetched $($response.processes.Count) processes" -ForegroundColor Gray
 
             # Debug: Show sample process properties on first page
-            if ($pageIndex -eq 0 -and $response.processes.Count -gt 0) {
+            if ($page -eq 1 -and $response.processes.Count -gt 0) {
                 $sampleProcess = $response.processes[0]
                 Write-Host "    Sample process: $($sampleProcess.name)" -ForegroundColor Gray
                 Write-Host "    Properties: processGroupId=$($sampleProcess.processGroupId), processGroupPath=$($sampleProcess.processGroupPath)" -ForegroundColor Gray
@@ -203,7 +203,7 @@ function Get-ProcessesFromGroup {
             $allProcesses += $groupProcesses
         }
 
-        $pageIndex++
+        $page++
     } while ($response -and $response.processes -and $response.processes.Count -eq $pageSize)
 
     Write-Host "  Total processes found: $($allProcesses.Count)" -ForegroundColor Green
