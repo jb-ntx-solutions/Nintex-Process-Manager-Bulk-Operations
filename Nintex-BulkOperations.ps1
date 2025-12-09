@@ -498,7 +498,10 @@ function New-ProcessGroup {
 
         Write-Host "  Group created with uniqueId: $newGroupUniqueId" -ForegroundColor Gray
 
-        # Step 2: Rename the group to the desired name
+        # Small delay to ensure group is fully created on server
+        Start-Sleep -Milliseconds 500
+
+        # Step 2: Rename the group to the desired name (with retry)
         $renameUrl = "$SiteURL/Process/Edit/RenameGroup"
         $renameBody = @{
             processGroupUniqueId = $newGroupUniqueId
@@ -506,16 +509,34 @@ function New-ProcessGroup {
         } | ConvertTo-Json
 
         Write-Host "  Step 2: Renaming group to '$GroupName'..." -ForegroundColor Gray
-        $renameResponse = Invoke-ApiPost -Url $renameUrl -Token $Token -Body $renameBody
 
-        if ($renameResponse) {
+        $renameSuccess = $false
+        $retryCount = 0
+        $maxRetries = 2
+
+        while (-not $renameSuccess -and $retryCount -le $maxRetries) {
+            if ($retryCount -gt 0) {
+                Write-Host "    Retry attempt $retryCount..." -ForegroundColor Gray
+                Start-Sleep -Seconds 1
+            }
+
+            $renameResponse = Invoke-ApiPost -Url $renameUrl -Token $Token -Body $renameBody
+
+            if ($renameResponse -and $renameResponse.isValid) {
+                $renameSuccess = $true
+            } else {
+                $retryCount++
+            }
+        }
+
+        if ($renameSuccess) {
             Write-Host "Successfully created and named group (uniqueId: $newGroupUniqueId)" -ForegroundColor Green
             return @{
                 uniqueId = $newGroupUniqueId
                 name = $GroupName
             }
         } else {
-            Write-Host "Group created but rename failed. uniqueId: $newGroupUniqueId" -ForegroundColor Yellow
+            Write-Host "Group created but rename failed after $maxRetries retries. uniqueId: $newGroupUniqueId" -ForegroundColor Yellow
             return @{
                 uniqueId = $newGroupUniqueId
                 name = "Unnamed Group"
