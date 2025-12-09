@@ -219,10 +219,10 @@ function Get-ArchivedProcesses {
 
     $allProcesses = @()
     $pageSize = 200
-    $pageIndex = 0
+    $page = 1
 
     do {
-        $url = "$SiteURL/BFF/Api/Processes/All/List?ListType=7&PageSize=$pageSize&PageIndex=$pageIndex"
+        $url = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$pageSize&ListType=7"
         $response = Invoke-ApiGet -Url $url -Token $Token
 
         if ($response -and $response.processes) {
@@ -236,7 +236,7 @@ function Get-ArchivedProcesses {
             }
         }
 
-        $pageIndex++
+        $page++
     } while ($response -and $response.processes -and $response.processes.Count -eq $pageSize)
 
     return $allProcesses
