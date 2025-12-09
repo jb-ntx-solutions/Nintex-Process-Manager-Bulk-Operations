@@ -462,30 +462,61 @@ function New-ProcessGroup {
         [string]$SiteURL,
         [string]$Token,
         [string]$GroupName,
-        [int]$ParentGroupId = 0
+        [string]$ParentGroupUniqueId = ""
     )
 
     try {
         Write-Host "Creating process group: $GroupName" -ForegroundColor Cyan
 
-        $url = "$SiteURL/Bff/Process/api/v1/processgroups"
-        $body = @{
-            name = $GroupName
-            parentId = $ParentGroupId
+        # Step 1: Create the group
+        $createUrl = "$SiteURL/Process/Edit/CreateGroup"
+        $createBody = @{
+            parentProcessGroupUniqueId = $ParentGroupUniqueId
         } | ConvertTo-Json
 
-        $response = Invoke-ApiPost -Url $url -Token $Token -Body $body
+        Write-Host "  Step 1: Creating group..." -ForegroundColor Gray
+        $createResponse = Invoke-ApiPost -Url $createUrl -Token $Token -Body $createBody
 
-        if ($response -and $response.id) {
-            Write-Host "Successfully created group with ID: $($response.id)" -ForegroundColor Green
+        if (-not $createResponse) {
+            Write-Host "Failed to create group. No response from CreateGroup API." -ForegroundColor Red
+            return $null
+        }
+
+        # Extract the new group's uniqueId from the response
+        $newGroupUniqueId = $createResponse.uniqueId
+        $newGroupId = $createResponse.id
+
+        if (-not $newGroupUniqueId) {
+            Write-Host "Failed to create group. Response did not contain uniqueId: $($createResponse | ConvertTo-Json -Depth 2)" -ForegroundColor Red
+            return $null
+        }
+
+        Write-Host "  Group created with uniqueId: $newGroupUniqueId" -ForegroundColor Gray
+
+        # Step 2: Rename the group to the desired name
+        $renameUrl = "$SiteURL/Process/Edit/RenameGroup"
+        $renameBody = @{
+            processGroupUniqueId = $newGroupUniqueId
+            newName = $GroupName
+        } | ConvertTo-Json
+
+        Write-Host "  Step 2: Renaming group to '$GroupName'..." -ForegroundColor Gray
+        $renameResponse = Invoke-ApiPost -Url $renameUrl -Token $Token -Body $renameBody
+
+        if ($renameResponse) {
+            Write-Host "Successfully created and named group (ID: $newGroupId)" -ForegroundColor Green
             return @{
-                id = $response.id
-                uniqueId = $response.uniqueId
+                id = $newGroupId
+                uniqueId = $newGroupUniqueId
                 name = $GroupName
             }
         } else {
-            Write-Host "Failed to create group. Response: $($response | ConvertTo-Json -Depth 2)" -ForegroundColor Red
-            return $null
+            Write-Host "Group created but rename failed. Group ID: $newGroupId, uniqueId: $newGroupUniqueId" -ForegroundColor Yellow
+            return @{
+                id = $newGroupId
+                uniqueId = $newGroupUniqueId
+                name = "Unnamed Group"
+            }
         }
     }
     catch {
