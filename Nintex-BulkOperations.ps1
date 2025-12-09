@@ -457,6 +457,44 @@ function Get-ProcessGroups {
     }
 }
 
+function New-ProcessGroup {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$GroupName,
+        [int]$ParentGroupId = 0
+    )
+
+    try {
+        Write-Host "Creating process group: $GroupName" -ForegroundColor Cyan
+
+        $url = "$SiteURL/Bff/Process/api/v1/processgroups"
+        $body = @{
+            name = $GroupName
+            parentId = $ParentGroupId
+        } | ConvertTo-Json
+
+        $response = Invoke-ApiPost -Url $url -Token $Token -Body $body
+
+        if ($response -and $response.id) {
+            Write-Host "Successfully created group with ID: $($response.id)" -ForegroundColor Green
+            return @{
+                id = $response.id
+                uniqueId = $response.uniqueId
+                name = $GroupName
+            }
+        } else {
+            Write-Host "Failed to create group. Response: $($response | ConvertTo-Json -Depth 2)" -ForegroundColor Red
+            return $null
+        }
+    }
+    catch {
+        Write-Host "Error creating process group: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host $_.ScriptStackTrace -ForegroundColor Red
+        return $null
+    }
+}
+
 function Show-GroupTree {
     param(
         [array]$Groups,
@@ -1287,15 +1325,16 @@ function Invoke-BulkDeleteProcesses {
     # Step 2: Create temporary group and restore all archived processes
     Write-Host "`n=== PHASE 2: Creating Temporary Group and Restoring Archives ===" -ForegroundColor Cyan
 
-    # Create temp group (simplified - in reality you'd need to create via API)
-    Write-Host "Creating temporary group: $TempGroupName" -ForegroundColor White
-    Write-Host "Note: Group creation via API may require additional implementation" -ForegroundColor Yellow
-    $tempGroupId = Read-Host "Enter the ID of a temporary group to use (or create one manually first)"
+    # Create temp group automatically
+    $tempGroup = New-ProcessGroup -SiteURL $SiteURL -Token $Token -GroupName $TempGroupName
 
-    if (-not $tempGroupId -or $tempGroupId -notmatch '^\d+$') {
-        Write-Host "Invalid group ID. Operation cancelled." -ForegroundColor Red
+    if (-not $tempGroup -or -not $tempGroup.id) {
+        Write-Host "Failed to create temporary group. Operation cancelled." -ForegroundColor Red
         return
     }
+
+    $tempGroupId = $tempGroup.id
+    Write-Host "Temporary group created with ID: $tempGroupId" -ForegroundColor Green
 
     # Get all archived processes
     $archivedProcesses = Get-ArchivedProcesses -SiteURL $SiteURL -Token $Token
