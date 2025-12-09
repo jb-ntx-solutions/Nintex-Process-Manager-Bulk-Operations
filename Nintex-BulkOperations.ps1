@@ -483,15 +483,27 @@ function New-ProcessGroup {
         }
 
         # Extract the new group's uniqueId from the response
-        $newGroupUniqueId = $createResponse.uniqueId
-        $newGroupId = $createResponse.id
+        # The API returns "groupid" (lowercase) which is the uniqueId
+        $newGroupUniqueId = $createResponse.groupid
 
         if (-not $newGroupUniqueId) {
-            Write-Host "Failed to create group. Response did not contain uniqueId: $($createResponse | ConvertTo-Json -Depth 2)" -ForegroundColor Red
+            Write-Host "Failed to create group. Response did not contain groupid: $($createResponse | ConvertTo-Json -Depth 2)" -ForegroundColor Red
             return $null
         }
 
         Write-Host "  Group created with uniqueId: $newGroupUniqueId" -ForegroundColor Gray
+
+        # Look up the numeric ID by fetching all groups and finding this one
+        Write-Host "  Looking up numeric group ID..." -ForegroundColor Gray
+        $allGroups = Get-ProcessGroups -SiteURL $SiteURL -Token $Token
+        $newGroup = $allGroups | Where-Object { $_.uniqueId -eq $newGroupUniqueId }
+        $newGroupId = if ($newGroup) { $newGroup.id } else { -1 }
+
+        if ($newGroupId -gt 0) {
+            Write-Host "  Found numeric ID: $newGroupId" -ForegroundColor Gray
+        } else {
+            Write-Host "  Warning: Could not find numeric ID for group" -ForegroundColor Yellow
+        }
 
         # Step 2: Rename the group to the desired name
         $renameUrl = "$SiteURL/Process/Edit/RenameGroup"
