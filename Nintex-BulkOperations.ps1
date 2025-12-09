@@ -493,18 +493,6 @@ function New-ProcessGroup {
 
         Write-Host "  Group created with uniqueId: $newGroupUniqueId" -ForegroundColor Gray
 
-        # Look up the numeric ID by fetching all groups and finding this one
-        Write-Host "  Looking up numeric group ID..." -ForegroundColor Gray
-        $allGroups = Get-ProcessGroups -SiteURL $SiteURL -Token $Token
-        $newGroup = $allGroups | Where-Object { $_.uniqueId -eq $newGroupUniqueId }
-        $newGroupId = if ($newGroup) { $newGroup.id } else { -1 }
-
-        if ($newGroupId -gt 0) {
-            Write-Host "  Found numeric ID: $newGroupId" -ForegroundColor Gray
-        } else {
-            Write-Host "  Warning: Could not find numeric ID for group" -ForegroundColor Yellow
-        }
-
         # Step 2: Rename the group to the desired name
         $renameUrl = "$SiteURL/Process/Edit/RenameGroup"
         $renameBody = @{
@@ -516,16 +504,14 @@ function New-ProcessGroup {
         $renameResponse = Invoke-ApiPost -Url $renameUrl -Token $Token -Body $renameBody
 
         if ($renameResponse) {
-            Write-Host "Successfully created and named group (ID: $newGroupId)" -ForegroundColor Green
+            Write-Host "Successfully created and named group (uniqueId: $newGroupUniqueId)" -ForegroundColor Green
             return @{
-                id = $newGroupId
                 uniqueId = $newGroupUniqueId
                 name = $GroupName
             }
         } else {
-            Write-Host "Group created but rename failed. Group ID: $newGroupId, uniqueId: $newGroupUniqueId" -ForegroundColor Yellow
+            Write-Host "Group created but rename failed. uniqueId: $newGroupUniqueId" -ForegroundColor Yellow
             return @{
-                id = $newGroupId
                 uniqueId = $newGroupUniqueId
                 name = "Unnamed Group"
             }
@@ -1371,13 +1357,13 @@ function Invoke-BulkDeleteProcesses {
     # Create temp group automatically
     $tempGroup = New-ProcessGroup -SiteURL $SiteURL -Token $Token -GroupName $TempGroupName
 
-    if (-not $tempGroup -or -not $tempGroup.id) {
+    if (-not $tempGroup -or -not $tempGroup.uniqueId) {
         Write-Host "Failed to create temporary group. Operation cancelled." -ForegroundColor Red
         return
     }
 
-    $tempGroupId = $tempGroup.id
-    Write-Host "Temporary group created with ID: $tempGroupId" -ForegroundColor Green
+    $tempGroupUniqueId = $tempGroup.uniqueId
+    Write-Host "Temporary group created with uniqueId: $tempGroupUniqueId" -ForegroundColor Green
 
     # Get all archived processes
     $archivedProcesses = Get-ArchivedProcesses -SiteURL $SiteURL -Token $Token
@@ -1387,7 +1373,7 @@ function Invoke-BulkDeleteProcesses {
     $restoredProcessIds = @()
     foreach ($archivedProc in $archivedProcesses) {
         Write-Host "Restoring archived process $($archivedProc.id) to temp group" -ForegroundColor White
-        $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess?id=$($archivedProc.id)&processGroupId=$tempGroupId"
+        $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess?id=$($archivedProc.id)&processGroupUniqueId=$tempGroupUniqueId"
         $result = Invoke-ApiPost -Url $restoreUrl -Token $Token
         if ($result) {
             $restoredProcessIds += $archivedProc.id
