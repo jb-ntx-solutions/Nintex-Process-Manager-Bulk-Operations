@@ -12,6 +12,14 @@ This script supports five distinct operation modes:
 4. **Bulk Update Ownership** - Update process owners and experts
 5. **Bulk Delete Processes** - Safely delete processes with reference detection and removal
 
+### Key Features
+
+- **Interactive Group Picker**: Browse and select groups from a hierarchical tree view
+- **Flexible ID Support**: Use numeric Group IDs or GUIDs from URLs
+- **CSV Flexibility**: Accepts various column naming conventions
+- **Comprehensive Error Handling**: Detailed logging and results tracking
+- **Safety Features**: Multiple confirmations for destructive operations
+
 ## Requirements
 
 - PowerShell 5.1 or later
@@ -58,6 +66,62 @@ The script will:
 2. Authenticate to your Nintex PM site
 3. Present a menu of operation modes
 4. Guide you through the selected operation
+
+### Group Selection
+
+When operations require selecting a process group, the script offers two options:
+
+#### Option 1: Interactive Group Tree Picker
+
+The script fetches all process groups and displays them in a hierarchical tree structure. Simply enter the number next to your desired group.
+
+**Example:**
+```
+Select Process Group
+======================================
+[1] Select from group tree
+[2] Enter Group ID manually
+======================================
+Choose an option (1-2): 1
+
+Available Process Groups:
+======================================
+[1] Corporate (ID: a1b2c3d4-...)
+  [2] Finance
+    [3] Accounts Payable
+    [4] Accounts Receivable
+  [5] Human Resources
+[6] Operations
+  [7] Manufacturing
+  [8] Quality Control
+======================================
+
+Enter the number of the group you want to select: 3
+Selected: Accounts Payable
+```
+
+#### Option 2: Manual Group ID Entry
+
+If you prefer to enter the Group ID directly, you can:
+
+- **Numeric ID**: Enter the number from the URL (e.g., `123` from `.../ProcessGroup/View/123`)
+- **GUID**: Enter the full GUID from the URL (e.g., `a1b2c3d4-e5f6-7890-abcd-ef1234567890`)
+
+The script automatically detects the format and resolves GUIDs to the internal numeric ID.
+
+**Example:**
+```
+Choose an option (1-2): 2
+
+Enter Process Group ID
+Examples:
+  - Numeric ID: .../ProcessGroup/View/123 - enter: 123
+  - GUID: .../ProcessGroup/View/a1b2c3d4-... - enter: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+
+Group ID: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+Resolving GUID to numeric ID...
+Found group: Accounts Payable
+```
 
 ### Operation Modes
 
@@ -284,6 +348,13 @@ For issues or questions:
 4. Contact your Nintex administrator
 
 ## Version History
+
+**Version 1.1** (Current)
+- Added interactive group tree picker
+- Support for GUID-based group IDs from URLs
+- Hierarchical group display with parent-child relationships
+- Automatic GUID to numeric ID resolution
+- Improved group selection with fallback options
 
 **Version 1.0** (Initial Release)
 - Five operation modes

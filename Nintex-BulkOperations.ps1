@@ -157,32 +157,59 @@ function Get-ProcessesFromGroup {
         [string]$SiteURL,
         [string]$Token,
         [int]$GroupID,
+        [string]$GroupUniqueId = "",
         [bool]$IncludeSubgroups = $true
     )
 
+    Write-Host "  Looking for processes in group ID: $GroupID (Include subgroups: $IncludeSubgroups)" -ForegroundColor Gray
+
     $allProcesses = @()
     $pageSize = 200
-    $pageIndex = 0
+    $page = 1
 
     do {
-        $url = "$SiteURL/BFF/Api/Processes/All/List?ListType=0&PageSize=$pageSize&PageIndex=$pageIndex"
+        $url = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$pageSize"
+        Write-Host "    DEBUG: Calling API: $url" -ForegroundColor Cyan
         $response = Invoke-ApiGet -Url $url -Token $Token
 
-        if ($response -and $response.processes) {
+        Write-Host "    DEBUG: Response type: $($response.GetType().Name)" -ForegroundColor Cyan
+        Write-Host "    DEBUG: Response has 'items' property: $($response.PSObject.Properties.Name -contains 'items')" -ForegroundColor Cyan
+        if ($response) {
+            Write-Host "    DEBUG: Response properties: $($response.PSObject.Properties.Name -join ', ')" -ForegroundColor Cyan
+        }
+
+        if ($response -and $response.items) {
+            Write-Host "    Page ${page}: Fetched $($response.items.Count) processes" -ForegroundColor Gray
+
+            # Debug: Show sample process properties on first page
+            if ($page -eq 1 -and $response.items.Count -gt 0) {
+                $sampleProcess = $response.items[0]
+                Write-Host "    Sample process: $($sampleProcess.processName)" -ForegroundColor Gray
+                Write-Host "    Properties: groupId=$($sampleProcess.groupId), groupUniqueId=$($sampleProcess.groupUniqueId)" -ForegroundColor Gray
+            }
+
             # Filter processes by group
-            $groupProcesses = $response.processes | Where-Object {
-                if ($IncludeSubgroups) {
-                    $_.processGroupPath -match "/$GroupID/" -or $_.processGroupPath -eq "/$GroupID"
+            $groupProcesses = $response.items | Where-Object {
+                if ($GroupUniqueId) {
+                    # If we have a uniqueId, use that for filtering
+                    $_.groupUniqueId -eq $GroupUniqueId
                 } else {
-                    $_.processGroupId -eq $GroupID
+                    # Otherwise use numeric groupId
+                    $_.groupId -eq $GroupID
                 }
             }
+
+            if ($groupProcesses.Count -gt 0) {
+                Write-Host "    Found $($groupProcesses.Count) matching processes on this page" -ForegroundColor Gray
+            }
+
             $allProcesses += $groupProcesses
         }
 
-        $pageIndex++
-    } while ($response -and $response.processes -and $response.processes.Count -eq $pageSize)
+        $page++
+    } while ($response -and $response.items -and $response.items.Count -eq $pageSize)
 
+    Write-Host "  Total processes found: $($allProcesses.Count)" -ForegroundColor Green
     return $allProcesses
 }
 
@@ -193,28 +220,33 @@ function Get-ArchivedProcesses {
         [int]$GroupID = -1
     )
 
+    Write-Host "  Fetching archived processes..." -ForegroundColor Gray
+
     $allProcesses = @()
     $pageSize = 200
-    $pageIndex = 0
+    $page = 1
 
     do {
-        $url = "$SiteURL/BFF/Api/Processes/All/List?ListType=7&PageSize=$pageSize&PageIndex=$pageIndex"
+        $url = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$pageSize&ListType=7"
         $response = Invoke-ApiGet -Url $url -Token $Token
 
-        if ($response -and $response.processes) {
+        if ($response -and $response.items) {
+            Write-Host "    Page ${page}: Found $($response.items.Count) archived processes" -ForegroundColor Gray
+
             if ($GroupID -gt 0) {
-                $groupProcesses = $response.processes | Where-Object {
-                    $_.processGroupId -eq $GroupID
+                $groupProcesses = $response.items | Where-Object {
+                    $_.groupId -eq $GroupID
                 }
                 $allProcesses += $groupProcesses
             } else {
-                $allProcesses += $response.processes
+                $allProcesses += $response.items
             }
         }
 
-        $pageIndex++
-    } while ($response -and $response.processes -and $response.processes.Count -eq $pageSize)
+        $page++
+    } while ($response -and $response.items -and $response.items.Count -eq $pageSize)
 
+    Write-Host "  Total archived processes: $($allProcesses.Count)" -ForegroundColor Gray
     return $allProcesses
 }
 
@@ -322,25 +354,366 @@ function Get-NewExpertFromCsvRow {
 # USER AND GROUP SELECTION
 # ============================================================================
 
+function Get-ChildGroupsRecursive {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$ParentUniqueId,
+        [int]$ParentId = $null,
+        [ref]$AllGroups
+    )
+
+    try {
+        $url = "$SiteURL/Process/View/GetChildProcessGroupTreeItems?uniqueId=$ParentUniqueId"
+        $response = Invoke-ApiGet -Url $url -Token $Token
+
+        if ($response -and $response.treeItems) {
+            # Filter for only group items (not processes or documents)
+            $groups = $response.treeItems | Where-Object {
+                $_.itemType -eq "group" -or $_.itemType -eq "documentgroup"
+            }
+
+            foreach ($group in $groups) {
+                # Add this group to our collection
+                if (-not $AllGroups.Value.ContainsKey($group.id)) {
+                    $AllGroups.Value[$group.id] = @{
+                        id = $group.id
+                        uniqueId = $group.uniqueId
+                        name = $group.title
+                        parentId = $ParentId
+                        hasChild = $group.hasChild
+                        totalSubgroups = $group.totalSubgroups
+                        itemOrder = $group.itemOrder
+                    }
+                }
+
+                # Recursively fetch children if this group has any
+                if ($group.hasChild -and $group.totalSubgroups -gt 0) {
+                    Get-ChildGroupsRecursive -SiteURL $SiteURL -Token $Token `
+                        -ParentUniqueId $group.uniqueId -ParentId $group.id `
+                        -AllGroups $AllGroups
+                }
+            }
+        }
+    }
+    catch {
+        Write-Host "  Error fetching children for group $ParentUniqueId : $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
+function Get-ProcessGroups {
+    param(
+        [string]$SiteURL,
+        [string]$Token
+    )
+
+    try {
+        Write-Host "Fetching group tree from Process Manager..." -ForegroundColor Cyan
+
+        # Get root groups by calling GetChildProcessGroupTreeItems without uniqueId parameter
+        Write-Host "  Getting root groups..." -ForegroundColor Gray
+        $url = "$SiteURL/Process/View/GetChildProcessGroupTreeItems"
+        $response = Invoke-ApiGet -Url $url -Token $Token
+
+        if (-not $response -or -not $response.treeItems) {
+            Write-Host "  Could not fetch root groups from API" -ForegroundColor Yellow
+            return @()
+        }
+
+        # Filter for only group items (not processes or documents)
+        $rootGroups = $response.treeItems | Where-Object {
+            $_.itemType -eq "group" -or $_.itemType -eq "documentgroup"
+        }
+
+        Write-Host "  Found $($rootGroups.Count) root groups" -ForegroundColor Green
+
+        # Now recursively fetch the full tree for each root group
+        $allGroups = @{}
+
+        foreach ($rootGroup in $rootGroups) {
+            Write-Host "  Fetching tree for: $($rootGroup.title)..." -ForegroundColor Gray
+
+            # Add root group
+            $allGroups[$rootGroup.id] = @{
+                id = $rootGroup.id
+                uniqueId = $rootGroup.uniqueId
+                name = $rootGroup.title
+                parentId = $null
+                hasChild = $rootGroup.hasChild
+                totalSubgroups = $rootGroup.totalSubgroups
+                itemOrder = $rootGroup.itemOrder
+            }
+
+            # Recursively fetch children if this group has any
+            if ($rootGroup.hasChild -and $rootGroup.totalSubgroups -gt 0) {
+                Get-ChildGroupsRecursive -SiteURL $SiteURL -Token $Token `
+                    -ParentUniqueId $rootGroup.uniqueId -ParentId $rootGroup.id `
+                    -AllGroups ([ref]$allGroups)
+            }
+        }
+
+        Write-Host "Successfully fetched $($allGroups.Count) groups total" -ForegroundColor Green
+        return $allGroups.Values | Sort-Object -Property itemOrder
+    }
+    catch {
+        Write-Host "Error fetching process groups: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host $_.ScriptStackTrace -ForegroundColor Red
+        return @()
+    }
+}
+
+function Get-GroupNumericIdByUniqueId {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$UniqueId
+    )
+
+    try {
+        Write-Host "    Looking for group with uniqueId: $UniqueId" -ForegroundColor Gray
+
+        # Get root level groups only (lightweight call)
+        $url = "$SiteURL/Process/View/GetChildProcessGroupTreeItems"
+        $response = Invoke-ApiGet -Url $url -Token $Token
+
+        if ($response -and $response.treeItems) {
+            Write-Host "    Found $($response.treeItems.Count) root groups" -ForegroundColor Gray
+
+            $matchedGroup = $response.treeItems | Where-Object { $_.uniqueId -eq $UniqueId }
+            if ($matchedGroup) {
+                Write-Host "    Found matching group with numeric ID: $($matchedGroup.id)" -ForegroundColor Gray
+                return $matchedGroup.id
+            } else {
+                Write-Host "    No matching group found with that uniqueId" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "    No root groups returned from API" -ForegroundColor Yellow
+        }
+        return -1
+    }
+    catch {
+        Write-Host "Error looking up group numeric ID: $($_.Exception.Message)" -ForegroundColor Red
+        return -1
+    }
+}
+
+function New-ProcessGroup {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$GroupName,
+        [string]$ParentGroupUniqueId = ""
+    )
+
+    try {
+        Write-Host "Creating process group: $GroupName" -ForegroundColor Cyan
+
+        # Step 1: Create the group
+        $createUrl = "$SiteURL/Process/Edit/CreateGroup"
+        $createBody = @{
+            parentProcessGroupUniqueId = $ParentGroupUniqueId
+        } | ConvertTo-Json
+
+        Write-Host "  Step 1: Creating group..." -ForegroundColor Gray
+        $createResponse = Invoke-ApiPost -Url $createUrl -Token $Token -Body $createBody
+
+        if (-not $createResponse) {
+            Write-Host "Failed to create group. No response from CreateGroup API." -ForegroundColor Red
+            return $null
+        }
+
+        Write-Host "  DEBUG: Create response: $($createResponse | ConvertTo-Json -Depth 2)" -ForegroundColor Cyan
+
+        # Extract the new group's uniqueId from the response
+        # The API returns "groupid" (lowercase) which is the uniqueId
+        $newGroupUniqueId = $createResponse.groupid
+
+        Write-Host "  DEBUG: Extracted groupid: '$newGroupUniqueId'" -ForegroundColor Cyan
+
+        if (-not $newGroupUniqueId) {
+            Write-Host "Failed to create group. Response did not contain groupid." -ForegroundColor Red
+            return $null
+        }
+
+        Write-Host "  Group created with uniqueId: $newGroupUniqueId" -ForegroundColor Gray
+
+        # Small delay to ensure group is fully created on server
+        Start-Sleep -Milliseconds 500
+
+        # Step 2: Rename the group to the desired name (with retry)
+        $renameUrl = "$SiteURL/Process/Edit/RenameGroup"
+        $renameBody = @{
+            processGroupUniqueId = $newGroupUniqueId
+            newName = $GroupName
+        } | ConvertTo-Json
+
+        Write-Host "  Step 2: Renaming group to '$GroupName'..." -ForegroundColor Gray
+
+        $renameSuccess = $false
+        $retryCount = 0
+        $maxRetries = 2
+
+        while (-not $renameSuccess -and $retryCount -le $maxRetries) {
+            if ($retryCount -gt 0) {
+                Write-Host "    Retry attempt $retryCount..." -ForegroundColor Gray
+                Start-Sleep -Seconds 1
+            }
+
+            $renameResponse = Invoke-ApiPost -Url $renameUrl -Token $Token -Body $renameBody
+
+            if ($renameResponse -and $renameResponse.isValid) {
+                $renameSuccess = $true
+            } else {
+                $retryCount++
+            }
+        }
+
+        # Step 3: Look up the numeric ID
+        Write-Host "  Step 3: Looking up numeric group ID..." -ForegroundColor Gray
+        $numericId = Get-GroupNumericIdByUniqueId -SiteURL $SiteURL -Token $Token -UniqueId $newGroupUniqueId
+
+        if ($renameSuccess) {
+            Write-Host "Successfully created and named group (ID: $numericId, uniqueId: $newGroupUniqueId)" -ForegroundColor Green
+            return @{
+                id = $numericId
+                uniqueId = $newGroupUniqueId
+                name = $GroupName
+            }
+        } else {
+            Write-Host "Group created but rename failed after $maxRetries retries. (ID: $numericId, uniqueId: $newGroupUniqueId)" -ForegroundColor Yellow
+            return @{
+                id = $numericId
+                uniqueId = $newGroupUniqueId
+                name = "Unnamed Group"
+            }
+        }
+    }
+    catch {
+        Write-Host "Error creating process group: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host $_.ScriptStackTrace -ForegroundColor Red
+        return $null
+    }
+}
+
+function Show-GroupTree {
+    param(
+        [array]$Groups,
+        [int]$ParentId = $null,
+        [int]$Level = 0,
+        [hashtable]$IndexMap
+    )
+
+    $indent = "  " * $Level
+    $filteredGroups = $Groups | Where-Object {
+        if ($ParentId -eq $null -or $ParentId -eq 0) {
+            $_.parentId -eq $null -or $_.parentId -eq 0
+        } else {
+            $_.parentId -eq $ParentId
+        }
+    } | Sort-Object -Property itemOrder
+
+    foreach ($group in $filteredGroups) {
+        $index = $IndexMap.Count + 1
+        $IndexMap[$index] = $group
+
+        $groupName = if ($group.name) { $group.name } else { "Group $($group.id)" }
+        $uniqueIdDisplay = if ($group.uniqueId) { " (ID: $($group.uniqueId))" } else { "" }
+
+        Write-Host "$indent[$index] $groupName$uniqueIdDisplay" -ForegroundColor Cyan
+
+        # Recursively show children
+        Show-GroupTree -Groups $Groups -ParentId $group.id -Level ($Level + 1) -IndexMap $IndexMap
+    }
+}
+
 function Select-ProcessGroup {
     param(
         [string]$SiteURL,
         [string]$Token,
-        [string]$Prompt = "Enter Process Group ID"
+        [string]$Prompt = "Select Process Group"
     )
 
     Write-Host "`n$Prompt" -ForegroundColor Cyan
-    Write-Host "You can find the Group ID in the URL when viewing a group in Process Manager" -ForegroundColor Gray
-    Write-Host "Example: .../ProcessGroup/View/123 - the ID is 123" -ForegroundColor Gray
+    Write-Host "======================================" -ForegroundColor Gray
+    Write-Host "[1] Select from group tree" -ForegroundColor White
+    Write-Host "[2] Enter Group ID manually" -ForegroundColor White
+    Write-Host "======================================" -ForegroundColor Gray
 
-    $groupId = Read-Host "Group ID"
+    $choice = Read-Host "Choose an option (1-2)"
 
-    if ($groupId -match '^\d+$') {
-        return [int]$groupId
-    } else {
-        Write-Host "Invalid Group ID. Must be a number." -ForegroundColor Red
-        return -1
+    if ($choice -eq "1") {
+        # Show group tree picker
+        Write-Host "`nFetching process groups..." -ForegroundColor Cyan
+        $groups = Get-ProcessGroups -SiteURL $SiteURL -Token $Token
+
+        if (-not $groups -or $groups.Count -eq 0) {
+            Write-Host "No groups found. Please enter Group ID manually." -ForegroundColor Yellow
+            $choice = "2"
+        } else {
+            Write-Host "`nAvailable Process Groups:" -ForegroundColor Green
+            Write-Host "======================================" -ForegroundColor Gray
+
+            $indexMap = @{}
+            Show-GroupTree -Groups $groups -IndexMap $indexMap
+
+            Write-Host "======================================" -ForegroundColor Gray
+            $selection = Read-Host "`nEnter the number of the group you want to select"
+
+            if ($indexMap.ContainsKey([int]$selection)) {
+                $selectedGroup = $indexMap[[int]$selection]
+                $groupName = if ($selectedGroup.name) { $selectedGroup.name } else { "Group $($selectedGroup.id)" }
+                Write-Host "Selected: $groupName" -ForegroundColor Green
+                return $selectedGroup
+            } else {
+                Write-Host "Invalid selection." -ForegroundColor Red
+                return $null
+            }
+        }
     }
+
+    if ($choice -eq "2") {
+        # Manual entry
+        Write-Host "`nEnter Process Group ID" -ForegroundColor Cyan
+        Write-Host "You can find the Group ID in the URL when viewing a group in Process Manager" -ForegroundColor Gray
+        Write-Host "Examples:" -ForegroundColor Gray
+        Write-Host "  - Numeric ID: .../ProcessGroup/View/123 - enter: 123" -ForegroundColor Gray
+        Write-Host "  - GUID: .../ProcessGroup/View/a1b2c3d4-... - enter: a1b2c3d4-e5f6-7890-abcd-ef1234567890" -ForegroundColor Gray
+
+        $groupId = Read-Host "`nGroup ID"
+
+        $groups = Get-ProcessGroups -SiteURL $SiteURL -Token $Token
+
+        # Check if it's a numeric ID
+        if ($groupId -match '^\d+$') {
+            $matchedGroup = $groups | Where-Object { $_.id -eq [int]$groupId }
+            if ($matchedGroup) {
+                Write-Host "Found group: $($matchedGroup.name)" -ForegroundColor Green
+                return $matchedGroup
+            } else {
+                Write-Host "Could not find group with ID: $groupId" -ForegroundColor Red
+                return $null
+            }
+        }
+        # Check if it's a GUID
+        elseif ($groupId -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+            $matchedGroup = $groups | Where-Object { $_.uniqueId -eq $groupId }
+
+            if ($matchedGroup) {
+                Write-Host "Found group: $($matchedGroup.name)" -ForegroundColor Green
+                return $matchedGroup
+            } else {
+                Write-Host "Could not find group with GUID: $groupId" -ForegroundColor Red
+                return $null
+            }
+        }
+        else {
+            Write-Host "Invalid Group ID format. Must be a number or a GUID." -ForegroundColor Red
+            return $null
+        }
+    }
+
+    Write-Host "Invalid choice." -ForegroundColor Red
+    return $null
 }
 
 function Search-User {
@@ -410,7 +783,8 @@ function Invoke-BulkArchive {
         [string]$SourceType,  # "CSV" or "Group"
         [string]$ObjectType,  # "Processes", "Documents", or "Both"
         [string]$CsvPath = "",
-        [int]$GroupID = -1
+        [int]$GroupID = -1,
+        [string]$GroupUniqueId = ""
     )
 
     Write-Host "`n========================================" -ForegroundColor Cyan
@@ -441,7 +815,7 @@ function Invoke-BulkArchive {
     else {  # Group-based
         if ($ObjectType -eq "Processes" -or $ObjectType -eq "Both") {
             $includeSubgroups = (Read-Host "Include subgroups? (Y/N)") -eq 'Y'
-            $processes = Get-ProcessesFromGroup -SiteURL $SiteURL -Token $Token -GroupID $GroupID -IncludeSubgroups $includeSubgroups
+            $processes = Get-ProcessesFromGroup -SiteURL $SiteURL -Token $Token -GroupID $GroupID -GroupUniqueId $GroupUniqueId -IncludeSubgroups $includeSubgroups
             $processesToArchive = $processes | ForEach-Object { $_.id }
             Write-Host "Found $($processesToArchive.Count) processes to archive" -ForegroundColor Green
         }
@@ -1001,6 +1375,7 @@ function Invoke-BulkDeleteProcesses {
         [string]$SourceType,  # "CSV" or "Group"
         [string]$CsvPath = "",
         [int]$GroupID = -1,
+        [string]$GroupUniqueId = "",
         [string]$TempGroupName = "Bulk Delete Temporary Group",
         [string]$CurrentUsername
     )
@@ -1036,7 +1411,7 @@ function Invoke-BulkDeleteProcesses {
     }
     else {  # Group-based
         $includeSubgroups = (Read-Host "Include subgroups? (Y/N)") -eq 'Y'
-        $processes = Get-ProcessesFromGroup -SiteURL $SiteURL -Token $Token -GroupID $GroupID -IncludeSubgroups $includeSubgroups
+        $processes = Get-ProcessesFromGroup -SiteURL $SiteURL -Token $Token -GroupID $GroupID -GroupUniqueId $GroupUniqueId -IncludeSubgroups $includeSubgroups
         $processesToDelete = $processes | ForEach-Object { $_.id }
     }
 
@@ -1050,15 +1425,17 @@ function Invoke-BulkDeleteProcesses {
     # Step 2: Create temporary group and restore all archived processes
     Write-Host "`n=== PHASE 2: Creating Temporary Group and Restoring Archives ===" -ForegroundColor Cyan
 
-    # Create temp group (simplified - in reality you'd need to create via API)
-    Write-Host "Creating temporary group: $TempGroupName" -ForegroundColor White
-    Write-Host "Note: Group creation via API may require additional implementation" -ForegroundColor Yellow
-    $tempGroupId = Read-Host "Enter the ID of a temporary group to use (or create one manually first)"
+    # Create temp group automatically
+    $tempGroup = New-ProcessGroup -SiteURL $SiteURL -Token $Token -GroupName $TempGroupName
 
-    if (-not $tempGroupId -or $tempGroupId -notmatch '^\d+$') {
-        Write-Host "Invalid group ID. Operation cancelled." -ForegroundColor Red
+    if (-not $tempGroup -or -not $tempGroup.id -or $tempGroup.id -lt 0) {
+        Write-Host "Failed to create temporary group. Operation cancelled." -ForegroundColor Red
         return
     }
+
+    $tempGroupId = $tempGroup.id
+    $tempGroupUniqueId = $tempGroup.uniqueId
+    Write-Host "Temporary group created (ID: $tempGroupId, uniqueId: $tempGroupUniqueId)" -ForegroundColor Green
 
     # Get all archived processes
     $archivedProcesses = Get-ArchivedProcesses -SiteURL $SiteURL -Token $Token
@@ -1067,11 +1444,22 @@ function Invoke-BulkDeleteProcesses {
     # Restore all to temp group
     $restoredProcessIds = @()
     foreach ($archivedProc in $archivedProcesses) {
-        Write-Host "Restoring archived process $($archivedProc.id) to temp group" -ForegroundColor White
-        $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess?id=$($archivedProc.id)&processGroupId=$tempGroupId"
-        $result = Invoke-ApiPost -Url $restoreUrl -Token $Token
+        Write-Host "Restoring archived process '$($archivedProc.processName)' (uniqueId: $($archivedProc.processUniqueId)) to temp group" -ForegroundColor White
+
+        $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess"
+        $restoreBody = @{
+            processUniqueId = $archivedProc.processUniqueId
+            processGroupId = $tempGroupId.ToString()
+        } | ConvertTo-Json
+
+        Write-Host "  DEBUG: Restore body: $restoreBody" -ForegroundColor Cyan
+
+        $result = Invoke-ApiPost -Url $restoreUrl -Token $Token -Body $restoreBody
         if ($result) {
-            $restoredProcessIds += $archivedProc.id
+            Write-Host "  Successfully restored" -ForegroundColor Green
+            $restoredProcessIds += $archivedProc.processId
+        } else {
+            Write-Host "  Failed to restore" -ForegroundColor Red
         }
     }
 
@@ -1313,9 +1701,9 @@ while ($running) {
                 $csvPath = Read-Host "Enter CSV file path"
                 Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -CsvPath $csvPath
             } else {
-                $groupId = Select-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Group to Archive"
-                if ($groupId -gt 0) {
-                    Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -GroupID $groupId
+                $group = Select-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Group to Archive"
+                if ($group) {
+                    Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -GroupID $group.id -GroupUniqueId $group.uniqueId
                 }
             }
         }
@@ -1334,7 +1722,10 @@ while ($running) {
             }
 
             if ($restoreGroupId -lt 0) {
-                $restoreGroupId = Select-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Target Group for Restore"
+                $restoreGroup = Select-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Target Group for Restore"
+                if ($restoreGroup) {
+                    $restoreGroupId = $restoreGroup.id
+                }
             }
 
             if ($restoreGroupId -gt 0) {
@@ -1370,9 +1761,9 @@ while ($running) {
                 $csvPath = Read-Host "Enter CSV file path"
                 Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -CsvPath $csvPath -TempGroupName $tempGroupName -CurrentUsername $config.Username
             } else {
-                $groupId = Select-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Group to Delete (WARNING: Destructive!)"
-                if ($groupId -gt 0) {
-                    Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -GroupID $groupId -TempGroupName $tempGroupName -CurrentUsername $config.Username
+                $group = Select-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Group to Delete (WARNING: Destructive!)"
+                if ($group) {
+                    Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -GroupID $group.id -GroupUniqueId $group.uniqueId -TempGroupName $tempGroupName -CurrentUsername $config.Username
                 }
             }
         }
