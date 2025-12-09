@@ -457,7 +457,7 @@ function Show-GroupTree {
 
     $indent = "  " * $Level
     $filteredGroups = $Groups | Where-Object {
-        if ($ParentId -eq $null) {
+        if ($ParentId -eq $null -or $ParentId -eq 0) {
             $_.parentId -eq $null -or $_.parentId -eq 0
         } else {
             $_.parentId -eq $ParentId
