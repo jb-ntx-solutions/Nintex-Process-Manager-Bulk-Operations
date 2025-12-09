@@ -1436,12 +1436,17 @@ function Invoke-BulkDeleteProcesses {
         $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess"
         $restoreBody = @{
             processUniqueId = $archivedProc.processUniqueId
-            processGroupId = $tempGroupId
+            processGroupId = $tempGroupId.ToString()
         } | ConvertTo-Json
+
+        Write-Host "  DEBUG: Restore body: $restoreBody" -ForegroundColor Cyan
 
         $result = Invoke-ApiPost -Url $restoreUrl -Token $Token -Body $restoreBody
         if ($result) {
+            Write-Host "  Successfully restored" -ForegroundColor Green
             $restoredProcessIds += $archivedProc.processId
+        } else {
+            Write-Host "  Failed to restore" -ForegroundColor Red
         }
     }
 
