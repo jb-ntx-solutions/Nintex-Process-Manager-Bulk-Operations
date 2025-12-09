@@ -470,15 +470,24 @@ function Get-GroupNumericIdByUniqueId {
     )
 
     try {
+        Write-Host "    Looking for group with uniqueId: $UniqueId" -ForegroundColor Gray
+
         # Get root level groups only (lightweight call)
         $url = "$SiteURL/Process/View/GetChildProcessGroupTreeItems"
         $response = Invoke-ApiGet -Url $url -Token $Token
 
         if ($response -and $response.treeItems) {
+            Write-Host "    Found $($response.treeItems.Count) root groups" -ForegroundColor Gray
+
             $matchedGroup = $response.treeItems | Where-Object { $_.uniqueId -eq $UniqueId }
             if ($matchedGroup) {
+                Write-Host "    Found matching group with numeric ID: $($matchedGroup.id)" -ForegroundColor Gray
                 return $matchedGroup.id
+            } else {
+                Write-Host "    No matching group found with that uniqueId" -ForegroundColor Yellow
             }
+        } else {
+            Write-Host "    No root groups returned from API" -ForegroundColor Yellow
         }
         return -1
     }
@@ -513,12 +522,16 @@ function New-ProcessGroup {
             return $null
         }
 
+        Write-Host "  DEBUG: Create response: $($createResponse | ConvertTo-Json -Depth 2)" -ForegroundColor Cyan
+
         # Extract the new group's uniqueId from the response
         # The API returns "groupid" (lowercase) which is the uniqueId
         $newGroupUniqueId = $createResponse.groupid
 
+        Write-Host "  DEBUG: Extracted groupid: '$newGroupUniqueId'" -ForegroundColor Cyan
+
         if (-not $newGroupUniqueId) {
-            Write-Host "Failed to create group. Response did not contain groupid: $($createResponse | ConvertTo-Json -Depth 2)" -ForegroundColor Red
+            Write-Host "Failed to create group. Response did not contain groupid." -ForegroundColor Red
             return $null
         }
 
