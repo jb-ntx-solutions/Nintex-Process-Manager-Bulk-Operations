@@ -462,6 +462,32 @@ function Get-ProcessGroups {
     }
 }
 
+function Get-GroupNumericIdByUniqueId {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$UniqueId
+    )
+
+    try {
+        # Get root level groups only (lightweight call)
+        $url = "$SiteURL/Process/View/GetChildProcessGroupTreeItems"
+        $response = Invoke-ApiGet -Url $url -Token $Token
+
+        if ($response -and $response.treeItems) {
+            $matchedGroup = $response.treeItems | Where-Object { $_.uniqueId -eq $UniqueId }
+            if ($matchedGroup) {
+                return $matchedGroup.id
+            }
+        }
+        return -1
+    }
+    catch {
+        Write-Host "Error looking up group numeric ID: $($_.Exception.Message)" -ForegroundColor Red
+        return -1
+    }
+}
+
 function New-ProcessGroup {
     param(
         [string]$SiteURL,
@@ -529,15 +555,21 @@ function New-ProcessGroup {
             }
         }
 
+        # Step 3: Look up the numeric ID
+        Write-Host "  Step 3: Looking up numeric group ID..." -ForegroundColor Gray
+        $numericId = Get-GroupNumericIdByUniqueId -SiteURL $SiteURL -Token $Token -UniqueId $newGroupUniqueId
+
         if ($renameSuccess) {
-            Write-Host "Successfully created and named group (uniqueId: $newGroupUniqueId)" -ForegroundColor Green
+            Write-Host "Successfully created and named group (ID: $numericId, uniqueId: $newGroupUniqueId)" -ForegroundColor Green
             return @{
+                id = $numericId
                 uniqueId = $newGroupUniqueId
                 name = $GroupName
             }
         } else {
-            Write-Host "Group created but rename failed after $maxRetries retries. uniqueId: $newGroupUniqueId" -ForegroundColor Yellow
+            Write-Host "Group created but rename failed after $maxRetries retries. (ID: $numericId, uniqueId: $newGroupUniqueId)" -ForegroundColor Yellow
             return @{
+                id = $numericId
                 uniqueId = $newGroupUniqueId
                 name = "Unnamed Group"
             }
@@ -1383,13 +1415,14 @@ function Invoke-BulkDeleteProcesses {
     # Create temp group automatically
     $tempGroup = New-ProcessGroup -SiteURL $SiteURL -Token $Token -GroupName $TempGroupName
 
-    if (-not $tempGroup -or -not $tempGroup.uniqueId) {
+    if (-not $tempGroup -or -not $tempGroup.id -or $tempGroup.id -lt 0) {
         Write-Host "Failed to create temporary group. Operation cancelled." -ForegroundColor Red
         return
     }
 
+    $tempGroupId = $tempGroup.id
     $tempGroupUniqueId = $tempGroup.uniqueId
-    Write-Host "Temporary group created with uniqueId: $tempGroupUniqueId" -ForegroundColor Green
+    Write-Host "Temporary group created (ID: $tempGroupId, uniqueId: $tempGroupUniqueId)" -ForegroundColor Green
 
     # Get all archived processes
     $archivedProcesses = Get-ArchivedProcesses -SiteURL $SiteURL -Token $Token
@@ -1398,11 +1431,17 @@ function Invoke-BulkDeleteProcesses {
     # Restore all to temp group
     $restoredProcessIds = @()
     foreach ($archivedProc in $archivedProcesses) {
-        Write-Host "Restoring archived process $($archivedProc.id) to temp group" -ForegroundColor White
-        $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess?id=$($archivedProc.id)&processGroupUniqueId=$tempGroupUniqueId"
-        $result = Invoke-ApiPost -Url $restoreUrl -Token $Token
+        Write-Host "Restoring archived process '$($archivedProc.processName)' (uniqueId: $($archivedProc.processUniqueId)) to temp group" -ForegroundColor White
+
+        $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess"
+        $restoreBody = @{
+            processUniqueId = $archivedProc.processUniqueId
+            processGroupId = $tempGroupId
+        } | ConvertTo-Json
+
+        $result = Invoke-ApiPost -Url $restoreUrl -Token $Token -Body $restoreBody
         if ($result) {
-            $restoredProcessIds += $archivedProc.id
+            $restoredProcessIds += $archivedProc.processId
         }
     }
 
