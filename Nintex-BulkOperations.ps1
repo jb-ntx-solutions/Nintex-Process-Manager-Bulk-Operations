@@ -168,7 +168,14 @@ function Get-ProcessesFromGroup {
 
     do {
         $url = "$SiteURL/BFF/Api/Processes/All/List?ListType=0&PageSize=$pageSize&PageIndex=$pageIndex"
+        Write-Host "    DEBUG: Calling API: $url" -ForegroundColor Cyan
         $response = Invoke-ApiGet -Url $url -Token $Token
+
+        Write-Host "    DEBUG: Response type: $($response.GetType().Name)" -ForegroundColor Cyan
+        Write-Host "    DEBUG: Response has 'processes' property: $($response.PSObject.Properties.Name -contains 'processes')" -ForegroundColor Cyan
+        if ($response) {
+            Write-Host "    DEBUG: Response properties: $($response.PSObject.Properties.Name -join ', ')" -ForegroundColor Cyan
+        }
 
         if ($response -and $response.processes) {
             Write-Host "    Page $($pageIndex + 1): Fetched $($response.processes.Count) processes" -ForegroundColor Gray
