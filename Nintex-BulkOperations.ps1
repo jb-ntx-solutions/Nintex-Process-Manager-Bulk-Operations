@@ -1855,8 +1855,9 @@ function Invoke-BulkDeleteProcesses {
                     }
 
                     # Add the current process to the list of processes that reference this dependency
-                    if ($dependencyMap[$depKey].ReferencedByProcesses -notcontains $processNumericId) {
-                        $dependencyMap[$depKey].ReferencedByProcesses += $processNumericId
+                    # Use $processKey (the original ID) as the key for consistency with processDeleteMap
+                    if ($dependencyMap[$depKey].ReferencedByProcesses -notcontains $processKey) {
+                        $dependencyMap[$depKey].ReferencedByProcesses += $processKey
                     }
 
                     Write-Host "    - $depName ($depUniqueId)" -ForegroundColor Gray
@@ -2107,8 +2108,9 @@ function Invoke-BulkDeleteProcesses {
                         $stillHasDeps = $false
                         if ($currentDeps -and $currentDeps.Count -gt 0) {
                             foreach ($depType in $currentDeps) {
-                                # Skip Linked Process and Linked Process Group (handled separately)
-                                if ($depType.Type -ne "Linked Process" -and $depType.Type -ne "Linked Process Group") {
+                                # Skip only Linked Process (automatically handled)
+                                # Include Linked Process Group since it requires manual removal
+                                if ($depType.Type -ne "Linked Process") {
                                     if ($depType.Dependencies -and $depType.Dependencies.Count -gt 0) {
                                         $stillHasDeps = $true
                                         Write-Host "    WARNING: Process still has $($depType.Dependencies.Count) dependencies of type '$($depType.Type)'" -ForegroundColor Red
