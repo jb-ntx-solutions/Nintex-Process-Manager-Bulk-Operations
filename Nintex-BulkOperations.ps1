@@ -1353,6 +1353,136 @@ function Get-ProcessStatus {
     }
 }
 
+function Find-ProcessLinksInJson {
+    param(
+        [string]$ProcessJson,
+        [string]$TargetProcessUniqueId
+    )
+
+    # Convert JSON string to object
+    $processObj = $ProcessJson | ConvertFrom-Json
+
+    # Check ProcessProcedures.ProcessLink
+    if ($processObj.ProcessProcedures.ProcessLink) {
+        $found = @($processObj.ProcessProcedures.ProcessLink | Where-Object {
+            $_.LinkedProcessUniqueId -eq $TargetProcessUniqueId
+        })
+        if ($found.Count -gt 0) {
+            return $true
+        }
+    }
+
+    # Check ChildProcessProcedures in Activities
+    if ($processObj.ProcessProcedures.Activity) {
+        foreach ($activity in $processObj.ProcessProcedures.Activity) {
+            if ($activity.ChildProcessProcedures) {
+                # Check each child type (Note, Task, Information, etc.)
+                $childTypes = @('Note', 'Task', 'Information', 'Form', 'Guide', 'Image', 'Policy', 'Training', 'Video', 'WebLink')
+
+                foreach ($childType in $childTypes) {
+                    if ($activity.ChildProcessProcedures.$childType) {
+                        foreach ($child in $activity.ChildProcessProcedures.$childType) {
+                            if ($child.LinkedProcessUniqueId -eq $TargetProcessUniqueId) {
+                                return $true
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return $false
+}
+
+function Get-ArchivedProcessDependencies {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [hashtable]$ProcessDeleteMap
+    )
+
+    Write-Host "  Fetching list of archived processes..." -ForegroundColor Gray
+
+    $archivedDependencies = @()
+    $page = 1
+    $pageSize = 20
+    $hasMore = $true
+
+    # Step 1: Fetch all archived processes with pagination
+    while ($hasMore) {
+        try {
+            $listUrl = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$pageSize&ListType=7"
+            $response = Invoke-ApiGet -Url $listUrl -Token $Token
+
+            if ($response -and $response.processes -and $response.processes.Count -gt 0) {
+                Write-Host "  Page $page : Found $($response.processes.Count) archived processes" -ForegroundColor Gray
+
+                # Collect UniqueIds for batch fetching
+                $uniqueIds = $response.processes | ForEach-Object { $_.processUniqueId }
+
+                # Step 2: Batch fetch archived process details (10-20 per batch for efficiency)
+                $batchSize = 15
+                for ($i = 0; $i -lt $uniqueIds.Count; $i += $batchSize) {
+                    $batch = $uniqueIds[$i..[Math]::Min($i + $batchSize - 1, $uniqueIds.Count - 1)]
+                    $batchUniqueIds = $batch -join ','
+
+                    try {
+                        $batchUrl = "$SiteURL/mobile/api/v1/processes?processUniqueIds=$batchUniqueIds"
+                        $batchResponse = Invoke-ApiGet -Url $batchUrl -Token $Token
+
+                        if ($batchResponse -and $batchResponse.Count -gt 0) {
+                            # Step 3: Search each archived process for links to processes being deleted
+                            foreach ($archivedProcess in $batchResponse) {
+                                $archivedUniqueId = $archivedProcess.uniqueId
+                                $archivedName = $archivedProcess.name
+                                $archivedProcessJson = $archivedProcess.processJson | ConvertTo-Json -Depth 20 -Compress
+
+                                # Check if this archived process has links to any process being deleted
+                                foreach ($processKey in $ProcessDeleteMap.Keys) {
+                                    $processInfo = $ProcessDeleteMap[$processKey]
+                                    $targetUniqueId = $processInfo.UniqueId
+
+                                    if (Find-ProcessLinksInJson -ProcessJson $archivedProcessJson -TargetProcessUniqueId $targetUniqueId) {
+                                        Write-Host "    Found: $archivedName has link to process $targetUniqueId" -ForegroundColor Yellow
+
+                                        # Add to dependencies list
+                                        $archivedDependencies += @{
+                                            Type = "Linked Process"
+                                            UniqueId = $archivedUniqueId
+                                            Name = $archivedName
+                                            ReferencedProcessKey = $processKey
+                                            IsArchived = $true
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch {
+                        Write-Host "  Warning: Failed to fetch batch of archived processes: $($_.Exception.Message)" -ForegroundColor Yellow
+                    }
+                }
+
+                # Check if there are more pages
+                if ($response.processes.Count -lt $pageSize) {
+                    $hasMore = $false
+                } else {
+                    $page++
+                }
+            } else {
+                $hasMore = $false
+            }
+        }
+        catch {
+            Write-Host "  Warning: Failed to fetch archived processes page $page : $($_.Exception.Message)" -ForegroundColor Yellow
+            $hasMore = $false
+        }
+    }
+
+    return $archivedDependencies
+}
+
 function Remove-ProcessLinksFromJson {
     param(
         [string]$ProcessJson,
@@ -1938,6 +2068,50 @@ function Invoke-BulkDeleteProcesses {
             Write-Host "Operation cancelled by user" -ForegroundColor Yellow
             return
         }
+    }
+
+    # Step 2.5: Check for dependencies in archived processes
+    Write-Host "`n=== PHASE 2.5: Checking Archived Process Dependencies ===" -ForegroundColor Cyan
+    Write-Host "NOTE: The CheckProcessDependencies API only returns dependencies from active processes." -ForegroundColor Gray
+    Write-Host "      We need to separately check archived processes for links to processes being deleted." -ForegroundColor Gray
+
+    $archivedDependencies = Get-ArchivedProcessDependencies -SiteURL $SiteURL -Token $Token -ProcessDeleteMap $processDeleteMap
+
+    if ($archivedDependencies.Count -gt 0) {
+        Write-Host "`nFound $($archivedDependencies.Count) archived process(es) with dependencies:" -ForegroundColor Yellow
+
+        # Add archived dependencies to the dependencyMap
+        foreach ($archivedDep in $archivedDependencies) {
+            $depKey = "$($archivedDep.Type)|$($archivedDep.UniqueId)"
+
+            if (-not $dependencyMap.ContainsKey($depKey)) {
+                $dependencyMap[$depKey] = @{
+                    Type = $archivedDep.Type
+                    UniqueId = $archivedDep.UniqueId
+                    Name = $archivedDep.Name
+                    ReferencedByProcesses = @()
+                    IsArchived = $true
+                }
+            }
+
+            # Add the process key that this archived process references
+            if ($dependencyMap[$depKey].ReferencedByProcesses -notcontains $archivedDep.ReferencedProcessKey) {
+                $dependencyMap[$depKey].ReferencedByProcesses += $archivedDep.ReferencedProcessKey
+            }
+
+            Write-Host "  [Archived] $($archivedDep.Name) ($($archivedDep.UniqueId))" -ForegroundColor White
+            Write-Host "    Has link to process being deleted" -ForegroundColor Gray
+        }
+
+        Write-Host "`nThese archived processes will be restored, have links removed, and then re-archived." -ForegroundColor Cyan
+
+        $proceed = Read-Host "`nDo you want to proceed with archived dependency removal? (Y/N)"
+        if ($proceed -ne 'Y') {
+            Write-Host "Operation cancelled by user" -ForegroundColor Yellow
+            return
+        }
+    } else {
+        Write-Host "No archived process dependencies found" -ForegroundColor Green
     }
 
     # Step 3: Create temporary group for restoring archived dependencies
