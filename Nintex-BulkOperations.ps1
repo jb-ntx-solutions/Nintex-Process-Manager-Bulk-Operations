@@ -137,22 +137,17 @@ function Invoke-ApiPut {
             "Authorization" = "Bearer $Token"
             "Content-Type" = "application/json"
             "Accept" = "application/json"
+            "X-Requested-With" = "XMLHttpRequest"
         }
 
         $jsonBody = $Body | ConvertTo-Json -Depth 10
 
-        # Use -StatusCodeVariable to capture the status code (PowerShell 7+)
-        # For older PowerShell, we'll rely on exception handling
-        try {
-            $response = Invoke-RestMethod -Uri $Url -Method Put -Headers $headers -Body $jsonBody -StatusCodeVariable statusCode -ErrorAction Stop
+        # Invoke-RestMethod throws on HTTP errors, so if this succeeds, we got a 2xx response
+        # No -StatusCodeVariable needed (not available in PowerShell 5.1)
+        $response = Invoke-RestMethod -Uri $Url -Method Put -Headers $headers -Body $jsonBody -ErrorAction Stop
 
-            # Success - return wrapped response with status code
-            return @{ Success = $true; StatusCode = $statusCode; Response = $response }
-        }
-        catch {
-            # -StatusCodeVariable not supported in older PowerShell, fall through to outer catch
-            throw
-        }
+        # Success - assume 200 since no exception was thrown
+        return @{ Success = $true; StatusCode = 200; Response = $response }
     }
     catch {
         $errorDetails = $_.Exception.Message
