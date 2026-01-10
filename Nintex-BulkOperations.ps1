@@ -540,52 +540,17 @@ function New-ProcessGroup {
         # Small delay to ensure group is fully created on server
         Start-Sleep -Milliseconds 500
 
-        # Step 2: Rename the group to the desired name (with retry)
-        $renameUrl = "$SiteURL/Process/Edit/RenameGroup"
-        $renameBody = @{
-            processGroupUniqueId = $newGroupUniqueId
-            newName = $GroupName
-        } | ConvertTo-Json
-
-        Write-Host "  Step 2: Renaming group to '$GroupName'..." -ForegroundColor Gray
-
-        $renameSuccess = $false
-        $retryCount = 0
-        $maxRetries = 2
-
-        while (-not $renameSuccess -and $retryCount -le $maxRetries) {
-            if ($retryCount -gt 0) {
-                Write-Host "    Retry attempt $retryCount..." -ForegroundColor Gray
-                Start-Sleep -Seconds 1
-            }
-
-            $renameResponse = Invoke-ApiPost -Url $renameUrl -Token $Token -Body $renameBody
-
-            if ($renameResponse -and $renameResponse.isValid) {
-                $renameSuccess = $true
-            } else {
-                $retryCount++
-            }
-        }
-
-        # Step 3: Look up the numeric ID
-        Write-Host "  Step 3: Looking up numeric group ID..." -ForegroundColor Gray
+        # Step 2: Look up the numeric ID (skipping rename to avoid API errors)
+        Write-Host "  Step 2: Looking up numeric group ID..." -ForegroundColor Gray
         $numericId = Get-GroupNumericIdByUniqueId -SiteURL $SiteURL -Token $Token -UniqueId $newGroupUniqueId
 
-        if ($renameSuccess) {
-            Write-Host "Successfully created and named group (ID: $numericId, uniqueId: $newGroupUniqueId)" -ForegroundColor Green
-            return @{
-                id = $numericId
-                uniqueId = $newGroupUniqueId
-                name = $GroupName
-            }
-        } else {
-            Write-Host "Group created but rename failed after $maxRetries retries. (ID: $numericId, uniqueId: $newGroupUniqueId)" -ForegroundColor Yellow
-            return @{
-                id = $numericId
-                uniqueId = $newGroupUniqueId
-                name = "Unnamed Group"
-            }
+        Write-Host "Successfully created group (ID: $numericId, uniqueId: $newGroupUniqueId)" -ForegroundColor Green
+        Write-Host "  Note: Group created with default name. Will be deleted at end of process." -ForegroundColor Gray
+
+        return @{
+            id = $numericId
+            uniqueId = $newGroupUniqueId
+            name = $GroupName
         }
     }
     catch {
@@ -1845,6 +1810,12 @@ function Invoke-BulkDeleteProcesses {
                 $typeName = $depType.Type
                 Write-Host "  Found $($depType.Dependencies.Count) dependencies of type: $typeName" -ForegroundColor Yellow
 
+                # Skip "Linked Process Group" dependencies as they don't need to be handled
+                if ($typeName -eq "Linked Process Group") {
+                    Write-Host "    Skipping Process Group dependencies (not relevant for deletion)" -ForegroundColor Gray
+                    continue
+                }
+
                 foreach ($dep in $depType.Dependencies) {
                     $depUniqueId = $dep.UniqueId
                     $depName = $dep.Name
@@ -1909,6 +1880,12 @@ function Invoke-BulkDeleteProcesses {
     $tempGroupUniqueId = $tempGroup.uniqueId
     Write-Host "Temporary group created (ID: $tempGroupId, uniqueId: $tempGroupUniqueId)" -ForegroundColor Green
 
+    $confirm = Read-Host "`nProceed to PHASE 4 (check and restore archived dependencies)? (Y/N)"
+    if ($confirm -ne 'Y') {
+        Write-Host "Operation cancelled by user" -ForegroundColor Yellow
+        return
+    }
+
     # Step 4: Check status of each dependency and restore if needed
     Write-Host "`n=== PHASE 4: Checking Dependency Status and Restoring Archived Dependencies ===" -ForegroundColor Cyan
 
@@ -1959,6 +1936,12 @@ function Invoke-BulkDeleteProcesses {
     }
 
     Write-Host "`nRestored $($restoredDependencies.Count) archived dependencies to temporary group" -ForegroundColor Green
+
+    $confirm = Read-Host "`nProceed to PHASE 5 (remove dependencies)? (Y/N)"
+    if ($confirm -ne 'Y') {
+        Write-Host "Operation cancelled by user" -ForegroundColor Yellow
+        return
+    }
 
     # Step 5: Remove dependencies
     Write-Host "`n=== PHASE 5: Removing Dependencies ===" -ForegroundColor Cyan
@@ -2154,26 +2137,8 @@ function Invoke-BulkDeleteProcesses {
         Write-Host "`n=== All Dependencies Processed ===" -ForegroundColor Green
     }
 
-    # Step 6: Update ownership to current user
-    Write-Host "`n=== PHASE 6: Updating Ownership ===" -ForegroundColor Cyan
-
-    foreach ($processId in $processesToDelete) {
-        Write-Host "Updating ownership of Process $processId to $CurrentUsername" -ForegroundColor White
-
-        $getUrl = "$SiteURL/Api/v1/Processes/$processId"
-        $process = Invoke-ApiGet -Url $getUrl -Token $Token
-
-        if ($process) {
-            $process.owner = $CurrentUsername
-            $process.expert = $CurrentUsername
-
-            $updateUrl = "$SiteURL/Api/v1/Processes/$processId"
-            Invoke-ApiPut -Url $updateUrl -Token $Token -Body $process | Out-Null
-        }
-    }
-
-    # Step 7: Archive processes
-    Write-Host "`n=== PHASE 7: Archiving Processes ===" -ForegroundColor Cyan
+    # Step 6: Archive processes (skipping ownership update as it's not needed with bypass approvals)
+    Write-Host "`n=== PHASE 6: Archiving Processes ===" -ForegroundColor Cyan
 
     $confirm = Read-Host "Ready to archive processes. Continue? (Y/N)"
     if ($confirm -ne 'Y') {
@@ -2182,14 +2147,22 @@ function Invoke-BulkDeleteProcesses {
     }
 
     foreach ($processId in $processesToDelete) {
-        Write-Host "Archiving Process $processId" -ForegroundColor White
+        $processUniqueId = $processDeleteMap[$processId]
 
-        $archiveUrl = "$SiteURL/Process/Edit/ArchiveProcess?id=$processId"
-        Invoke-ApiPost -Url $archiveUrl -Token $Token | Out-Null
+        # Check if process is already archived
+        $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId
+
+        if ($processStatus -and $processStatus.ProcessModel.State -eq "Archived") {
+            Write-Host "Process $processId is already archived - skipping" -ForegroundColor Gray
+        } else {
+            Write-Host "Archiving Process $processId" -ForegroundColor White
+            $archiveUrl = "$SiteURL/Process/Edit/ArchiveProcess?id=$processId"
+            Invoke-ApiPost -Url $archiveUrl -Token $Token | Out-Null
+        }
     }
 
-    # Step 8: Delete processes
-    Write-Host "`n=== PHASE 8: Deleting Processes ===" -ForegroundColor Cyan
+    # Step 7: Delete processes
+    Write-Host "`n=== PHASE 7: Deleting Processes ===" -ForegroundColor Cyan
 
     $confirm = Read-Host "Ready to PERMANENTLY DELETE processes. Type 'DELETE' to confirm"
     if ($confirm -ne 'DELETE') {
@@ -2220,8 +2193,16 @@ function Invoke-BulkDeleteProcesses {
         }
     }
 
-    # Step 9: Re-archive temporarily restored dependencies
-    Write-Host "`n=== PHASE 9: Re-archiving Temporarily Restored Dependencies ===" -ForegroundColor Cyan
+    Write-Host "`nProcesses deleted. Total: $($results.Count)" -ForegroundColor Cyan
+
+    $confirm = Read-Host "`nProceed to PHASE 8 (re-archive temporarily restored dependencies)? (Y/N)"
+    if ($confirm -ne 'Y') {
+        Write-Host "Operation cancelled by user" -ForegroundColor Yellow
+        return
+    }
+
+    # Step 8: Re-archive temporarily restored dependencies
+    Write-Host "`n=== PHASE 8: Re-archiving Temporarily Restored Dependencies ===" -ForegroundColor Cyan
 
     foreach ($restoredDep in $restoredDependencies) {
         Write-Host "Re-archiving dependency: $($restoredDep.Name) (ID: $($restoredDep.NumericId))" -ForegroundColor White
@@ -2236,8 +2217,16 @@ function Invoke-BulkDeleteProcesses {
         }
     }
 
-    # Step 10: Clean up temp group
-    Write-Host "`n=== PHASE 10: Cleanup ===" -ForegroundColor Cyan
+    Write-Host "`nRe-archived $($restoredDependencies.Count) dependencies" -ForegroundColor Green
+
+    $confirm = Read-Host "`nProceed to PHASE 9 (cleanup and save results)? (Y/N)"
+    if ($confirm -ne 'Y') {
+        Write-Host "Operation cancelled by user" -ForegroundColor Yellow
+        return
+    }
+
+    # Step 9: Clean up temp group
+    Write-Host "`n=== PHASE 9: Cleanup ===" -ForegroundColor Cyan
     Write-Host "You should manually delete the temporary group (ID: $tempGroupId) if it's empty" -ForegroundColor Yellow
 
     # Save results
