@@ -2014,9 +2014,11 @@ function Invoke-BulkDeleteProcesses {
 
                 # For each process being deleted that references this dependency
                 foreach ($processIdToDelete in $processesToRemoveFrom) {
-                    $processUniqueIdToDelete = $processDeleteMap[$processIdToDelete]
+                    $processInfo = $processDeleteMap[$processIdToDelete]
+                    $processUniqueIdToDelete = $processInfo.UniqueId
 
                     Write-Host "  Removing link from dependent process: $($dep.Name) ($($dep.UniqueId))" -ForegroundColor White
+                    Write-Host "    Target process to remove: $processUniqueIdToDelete" -ForegroundColor Gray
 
                     $success = Update-ProcessAndPublish -SiteURL $SiteURL -Token $Token `
                         -ProcessUniqueId $dep.UniqueId `
@@ -2080,7 +2082,8 @@ function Invoke-BulkDeleteProcesses {
 
             # Display dependencies grouped by process
             foreach ($processIdToDelete in $manualDepsByProcess.Keys) {
-                $processUniqueIdToDelete = $processDeleteMap[$processIdToDelete]
+                $processInfo = $processDeleteMap[$processIdToDelete]
+                $processUniqueIdToDelete = $processInfo.UniqueId
                 $deps = $manualDepsByProcess[$processIdToDelete]
 
                 Write-Host "Process to be deleted: ID $processIdToDelete (UniqueId: $processUniqueIdToDelete)" -ForegroundColor White
@@ -2116,7 +2119,8 @@ function Invoke-BulkDeleteProcesses {
 
                     $validationFailed = $false
                     foreach ($processId in $manualDepsByProcess.Keys) {
-                        $processUniqueId = $processDeleteMap[$processId]
+                        $processInfo = $processDeleteMap[$processId]
+                        $processUniqueId = $processInfo.UniqueId
                         Write-Host "  Checking process $processId..." -ForegroundColor Gray
 
                         $currentDeps = Get-ProcessDependencies -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId
