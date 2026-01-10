@@ -1837,12 +1837,6 @@ function Invoke-BulkDeleteProcesses {
                 $typeName = $depType.Type
                 Write-Host "  Found $($depType.Dependencies.Count) dependencies of type: $typeName" -ForegroundColor Yellow
 
-                # Skip "Linked Process Group" dependencies as they don't need to be handled
-                if ($typeName -eq "Linked Process Group") {
-                    Write-Host "    Skipping Process Group dependencies (not relevant for deletion)" -ForegroundColor Gray
-                    continue
-                }
-
                 foreach ($dep in $depType.Dependencies) {
                     $depUniqueId = $dep.UniqueId
                     $depName = $dep.Name
@@ -1956,9 +1950,9 @@ function Invoke-BulkDeleteProcesses {
                 Write-Host "  Could not retrieve process status" -ForegroundColor Red
             }
         } elseif ($dep.Type -eq "Linked Process Group") {
-            Write-Host "Dependency is a Process Group: $($dep.Name) - Groups will be handled separately" -ForegroundColor Cyan
+            Write-Host "Dependency is a Process Group: $($dep.Name) - Will require manual removal" -ForegroundColor Cyan
         } else {
-            Write-Host "Dependency type '$($dep.Type)' - will be handled as needed" -ForegroundColor Cyan
+            Write-Host "Dependency type '$($dep.Type)' - Will require manual removal" -ForegroundColor Cyan
         }
     }
 
@@ -1978,7 +1972,6 @@ function Invoke-BulkDeleteProcesses {
     } else {
         # Separate dependencies by type
         $linkedProcessDeps = @()
-        $linkedProcessGroupDeps = @()
         $manualDeps = @()
 
         foreach ($depKey in $dependencyMap.Keys) {
@@ -1986,10 +1979,8 @@ function Invoke-BulkDeleteProcesses {
             if ($dep.Type -eq "Linked Process") {
                 $linkedProcessDeps += $dep
             }
-            elseif ($dep.Type -eq "Linked Process Group") {
-                $linkedProcessGroupDeps += $dep
-            }
             else {
+                # All other dependencies (including Linked Process Group) require manual removal
                 $manualDeps += $dep
             }
         }
@@ -2050,20 +2041,7 @@ function Invoke-BulkDeleteProcesses {
             }
         }
 
-        # Handle Linked Process Group dependencies (informational only)
-        if ($linkedProcessGroupDeps.Count -gt 0) {
-            Write-Host "`n--- Linked Process Group Dependencies (No Action Required) ---" -ForegroundColor Cyan
-            Write-Host "The following Process Group dependencies were found but do not need to be removed:" -ForegroundColor Yellow
-
-            foreach ($dep in $linkedProcessGroupDeps) {
-                Write-Host "  - $($dep.Name) (UniqueId: $($dep.UniqueId))" -ForegroundColor Gray
-                Write-Host "    Referenced by $($dep.ReferencedByProcesses.Count) process(es) being deleted" -ForegroundColor Gray
-            }
-
-            Write-Host "`nProcess Group dependencies are informational and do not block deletion." -ForegroundColor Green
-        }
-
-        # Handle manual removal dependencies
+        # Handle manual removal dependencies (includes Linked Process Group and other types)
         if ($manualDeps.Count -gt 0) {
             Write-Host "`n--- Manual Dependency Removal Required ---" -ForegroundColor Yellow
             Write-Host "The following dependencies require MANUAL removal:" -ForegroundColor Yellow
