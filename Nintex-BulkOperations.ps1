@@ -1371,7 +1371,7 @@ function Remove-ProcessLinksFromJson {
                                 # Clear the linked process fields
                                 $child.LinkedProcessId = $null
                                 $child.LinkedProcessUniqueId = $null
-                                $child.LinkedProcessName = ""
+                                $child.LinkedProcessName = $null
                                 $child.LinkedProcessDisplayName = $null
                                 $child.LinkedProcessGroupId = $null
                                 $child.LinkedProcessGroupName = $null
@@ -1432,6 +1432,14 @@ function Update-ProcessAndPublish {
         }
 
         Write-Host "  Removed $($result.LinksRemoved) link(s)" -ForegroundColor Green
+
+        # Verify ProcessRevisionEditId is preserved in cleaned JSON
+        $cleanedObj = $result.CleanedJson | ConvertFrom-Json
+        if ($cleanedObj.ProcessRevisionEditId -ne $processRevisionEditId) {
+            Write-Host "  WARNING: ProcessRevisionEditId mismatch! Original: $processRevisionEditId, Cleaned: $($cleanedObj.ProcessRevisionEditId)" -ForegroundColor Yellow
+        } else {
+            Write-Host "  ProcessRevisionEditId verified: $processRevisionEditId" -ForegroundColor Gray
+        }
 
         # Step 3: Update process with cleaned JSON
         Write-Host "  Updating process..." -ForegroundColor Gray
