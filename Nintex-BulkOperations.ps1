@@ -1516,10 +1516,13 @@ function Update-ProcessAndPublish {
             if ($ApprovalsEnabled) {
                 Write-Host "  Approvals enabled - submitting for approval and bypassing..." -ForegroundColor Gray
 
+                # Get the updated process JSON with new ProcessRevisionEditId
+                $updatedProcessJson = $updatedProcessData.processJson | ConvertTo-Json -Depth 20 -Compress
+
                 # Submit for approval
                 $submitBody = @{
-                    ProcessJson = $result.CleanedJson
-                    ChangeDescription = "Bulk update."
+                    ProcessJson = $updatedProcessJson
+                    ChangeDescription = "Automated dependency removal"
                     DoSubmitForApproval = $true
                     DoPublish = $false
                     SuppressChangeNotification = $false
@@ -1541,7 +1544,9 @@ function Update-ProcessAndPublish {
                     return $false
                 }
 
-                # Wait and get the latest ProcessRevisionEditId
+                Write-Host "  Submitted for approval successfully" -ForegroundColor Green
+
+                # Wait and get the latest ProcessRevisionEditId after submit
                 Start-Sleep -Seconds 2
                 $latestProcessData = Invoke-ApiGet -Url $getUrl -Token $Token
                 $latestProcessRevisionEditId = $latestProcessData.processJson.ProcessRevisionEditId
