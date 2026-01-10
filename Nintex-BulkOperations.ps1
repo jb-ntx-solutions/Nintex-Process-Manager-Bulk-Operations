@@ -140,11 +140,46 @@ function Invoke-ApiPut {
         }
 
         $jsonBody = $Body | ConvertTo-Json -Depth 10
-        return Invoke-RestMethod -Uri $Url -Method Put -Headers $headers -Body $jsonBody
+
+        # Use -StatusCodeVariable to capture the status code (PowerShell 7+)
+        # For older PowerShell, we'll rely on exception handling
+        try {
+            $response = Invoke-RestMethod -Uri $Url -Method Put -Headers $headers -Body $jsonBody -StatusCodeVariable statusCode -ErrorAction Stop
+
+            # Success - return wrapped response with status code
+            return @{ Success = $true; StatusCode = $statusCode; Response = $response }
+        }
+        catch {
+            # -StatusCodeVariable not supported in older PowerShell, fall through to outer catch
+            throw
+        }
     }
     catch {
-        Write-Host "API PUT Error ($Url): $($_.Exception.Message)" -ForegroundColor Red
-        return $null
+        $errorDetails = $_.Exception.Message
+        $statusCode = "Unknown"
+
+        # Try to extract status code from exception
+        if ($_.Exception.Response) {
+            $statusCode = [int]$_.Exception.Response.StatusCode
+
+            # Try to read response body for more details
+            try {
+                $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+                $responseBody = $reader.ReadToEnd()
+                $reader.Close()
+                if ($responseBody) {
+                    Write-Host "  Response body: $responseBody" -ForegroundColor Gray
+                }
+            }
+            catch {
+                # Couldn't read response body
+            }
+        }
+
+        Write-Host "API PUT Error ($Url): HTTP $statusCode - $errorDetails" -ForegroundColor Red
+
+        # Return error info instead of null so caller can check status
+        return @{ Success = $false; StatusCode = $statusCode; Error = $errorDetails }
     }
 }
 
@@ -1078,7 +1113,7 @@ function Invoke-BulkUpdateLocation {
                 $updateUrl = "$SiteURL/Api/v1/Processes/$objectId"
                 $updateResult = Invoke-ApiPut -Url $updateUrl -Token $Token -Body $process
 
-                if ($updateResult) {
+                if ($updateResult -and $updateResult.Success) {
                     Write-Host "  Success: Process moved" -ForegroundColor Green
                     $results += [PSCustomObject]@{
                         ObjectType = "Process"
@@ -1193,7 +1228,7 @@ function Invoke-BulkUpdateOwnership {
                 $updateUrl = "$SiteURL/Api/v1/Processes/$processId"
                 $updateResult = Invoke-ApiPut -Url $updateUrl -Token $Token -Body $process
 
-                if ($updateResult) {
+                if ($updateResult -and $updateResult.Success) {
                     Write-Host "  Success: Ownership updated" -ForegroundColor Green
                     $results += [PSCustomObject]@{
                         ObjectType = "Process"
@@ -1461,12 +1496,18 @@ function Update-ProcessAndPublish {
         $updateUrl = "$SiteURL/Api/v1/Processes/$ProcessUniqueId"
         $updateResult = Invoke-ApiPut -Url $updateUrl -Token $Token -Body $updateBody
 
-        if (-not $updateResult) {
+        if (-not $updateResult -or -not $updateResult.Success) {
             Write-Host "  Failed to update process" -ForegroundColor Red
+            if ($updateResult.Error) {
+                Write-Host "    Error: $($updateResult.Error)" -ForegroundColor Red
+            }
+            if ($updateResult.StatusCode) {
+                Write-Host "    HTTP Status: $($updateResult.StatusCode)" -ForegroundColor Red
+            }
             return $false
         }
 
-        Write-Host "  Process updated successfully" -ForegroundColor Green
+        Write-Host "  Process updated successfully (HTTP $($updateResult.StatusCode))" -ForegroundColor Green
 
         # Step 4: Publish if needed
         if ($wasPreviouslyPublished) {
@@ -1497,8 +1538,11 @@ function Update-ProcessAndPublish {
 
                 $submitResult = Invoke-ApiPut -Url $updateUrl -Token $Token -Body $submitBody
 
-                if (-not $submitResult) {
+                if (-not $submitResult -or -not $submitResult.Success) {
                     Write-Host "  Failed to submit for approval" -ForegroundColor Red
+                    if ($submitResult.Error) {
+                        Write-Host "    Error: $($submitResult.Error)" -ForegroundColor Red
+                    }
                     return $false
                 }
 
