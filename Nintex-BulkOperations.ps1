@@ -1,5 +1,5 @@
 # Nintex Process Manager Bulk Operations Script
-# Version 1.0
+# Version 2.1 (Document Deletion + BFF API Headers)
 # Supports: Archive, Restore, Update Location, Update Ownership, and Delete operations
 
 #Requires -Version 5.1
@@ -3085,6 +3085,8 @@ Clear-Host
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  NINTEX PROCESS MANAGER BULK OPERATIONS" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
+Write-Host "  Version 2.1 (Document Deletion + BFF API Headers)" -ForegroundColor Yellow
+Write-Host "  Script loaded: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Yellow
 Write-Host ""
 
 # Load configuration
