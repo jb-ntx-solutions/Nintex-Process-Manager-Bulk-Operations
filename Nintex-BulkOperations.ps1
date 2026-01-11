@@ -86,10 +86,19 @@ function Invoke-ApiGet {
     )
 
     try {
+        # V2: Added X-Requested-With header for BFF APIs
         $headers = @{
             "Authorization" = "Bearer $Token"
             "Accept" = "application/json"
+            "Content-Type" = "application/json"
+            "X-Requested-With" = "XMLHttpRequest"
         }
+
+        # Debug: Show we're using the new version
+        if ($Url -like "*bff/document*") {
+            Write-Host "  [INVOKE-APIGET V2] Calling with X-Requested-With header" -ForegroundColor DarkGreen
+        }
+
         return Invoke-RestMethod -Uri $Url -Method Get -Headers $headers
     }
     catch {
@@ -283,6 +292,11 @@ function Get-DocumentsFromGroup {
         [bool]$IncludeSubgroups = $true
     )
 
+    Write-Host "  [DEBUG] *** Get-DocumentsFromGroup ENTRY ***" -ForegroundColor Magenta
+    Write-Host "  [DEBUG] GroupUniqueId parameter: '$GroupUniqueId'" -ForegroundColor Magenta
+    Write-Host "  [DEBUG] GroupUniqueId is null/empty: $([string]::IsNullOrEmpty($GroupUniqueId))" -ForegroundColor Magenta
+    Write-Host "  [DEBUG] IncludeSubgroups: $IncludeSubgroups" -ForegroundColor Magenta
+
     Write-Host "  Fetching documents from group (Include subgroups: $IncludeSubgroups)..." -ForegroundColor Gray
 
     if (-not $GroupUniqueId) {
@@ -296,35 +310,65 @@ function Get-DocumentsFromGroup {
 
     do {
         $url = "$SiteURL/bff/document/api/v1/documents?Page=$page&PageSize=$pageSize&ListType=All&DocumentType=All&ProcessGroupId=$GroupUniqueId"
+        Write-Host "    [DEBUG] Calling document API: $url" -ForegroundColor Yellow
         $response = Invoke-ApiGet -Url $url -Token $Token
+
+        Write-Host "    [DEBUG] Response type: $($response.GetType().Name)" -ForegroundColor Yellow
+        if ($response) {
+            Write-Host "    [DEBUG] Response has 'items' property: $($response.PSObject.Properties.Name -contains 'items')" -ForegroundColor Yellow
+            if ($response.PSObject.Properties.Name) {
+                Write-Host "    [DEBUG] Response properties: $($response.PSObject.Properties.Name -join ', ')" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "    [DEBUG] Response is null!" -ForegroundColor Red
+        }
 
         if ($response -and $response.items) {
             Write-Host "    Page ${page}: Fetched $($response.items.Count) documents" -ForegroundColor Gray
+            Write-Host "    [DEBUG] Items type: $($response.items.GetType().Name)" -ForegroundColor Yellow
+            Write-Host "    [DEBUG] Items count: $($response.items.Count)" -ForegroundColor Yellow
 
             # Debug: Show first document's properties on first page
             if ($page -eq 1 -and $response.items.Count -gt 0) {
                 $firstDoc = $response.items[0]
+                Write-Host "    [DEBUG] First item type: $($firstDoc.GetType().Name)" -ForegroundColor Yellow
+                if ($firstDoc.PSObject.Properties.Name) {
+                    Write-Host "    [DEBUG] First item properties: $($firstDoc.PSObject.Properties.Name -join ', ')" -ForegroundColor Yellow
+                }
                 Write-Host "    [DEBUG] Sample document properties: documentId=$($firstDoc.documentId), documentName=$($firstDoc.documentName), documentUniqueId=$($firstDoc.documentUniqueId)" -ForegroundColor Yellow
             }
 
             # If not including subgroups, filter to only documents in the target group
             if ($IncludeSubgroups) {
+                Write-Host "    [DEBUG] Including all documents (subgroups=true)" -ForegroundColor Yellow
                 $allDocuments += $response.items
             } else {
+                Write-Host "    [DEBUG] Filtering by primaryGroupUniqueId: $GroupUniqueId" -ForegroundColor Yellow
                 $groupDocuments = $response.items | Where-Object {
                     $_.primaryGroupUniqueId -eq $GroupUniqueId
                 }
                 if ($groupDocuments) {
                     Write-Host "    Found $($groupDocuments.Count) documents in target group only" -ForegroundColor Gray
                     $allDocuments += $groupDocuments
+                } else {
+                    Write-Host "    [DEBUG] No documents matched primaryGroupUniqueId filter" -ForegroundColor Yellow
                 }
             }
+
+            Write-Host "    [DEBUG] allDocuments count after this page: $($allDocuments.Count)" -ForegroundColor Yellow
+            if ($allDocuments.Count -gt 0) {
+                Write-Host "    [DEBUG] allDocuments type: $($allDocuments.GetType().Name)" -ForegroundColor Yellow
+                Write-Host "    [DEBUG] allDocuments[0] type: $($allDocuments[0].GetType().Name)" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "    [DEBUG] No items in response or response is null" -ForegroundColor Red
         }
 
         $page++
     } while ($response -and $response.items -and $response.items.Count -eq $pageSize)
 
     Write-Host "  Total documents found: $($allDocuments.Count)" -ForegroundColor Green
+    Write-Host "  [DEBUG] Returning allDocuments, type: $($allDocuments.GetType().Name), count: $($allDocuments.Count)" -ForegroundColor Yellow
     return $allDocuments
 }
 
@@ -2275,7 +2319,19 @@ function Invoke-BulkDeleteProcesses {
         # If deleting documents, fetch them now
         if ($deleteDocuments) {
             Write-Host "`n  Fetching documents..." -ForegroundColor Gray
+            Write-Host "  [DEBUG] *** BEFORE calling Get-DocumentsFromGroup ***" -ForegroundColor Cyan
+            Write-Host "  [DEBUG] GroupUniqueId to pass: '$GroupUniqueId'" -ForegroundColor Cyan
+            Write-Host "  [DEBUG] IncludeSubgroups to pass: $includeSubgroups" -ForegroundColor Cyan
+
             $documents = Get-DocumentsFromGroup -SiteURL $SiteURL -Token $Token -GroupUniqueId $GroupUniqueId -IncludeSubgroups $includeSubgroups
+
+            Write-Host "  [DEBUG] *** AFTER calling Get-DocumentsFromGroup ***" -ForegroundColor Cyan
+            Write-Host "  [DEBUG] Return value type: $($documents.GetType().Name)" -ForegroundColor Cyan
+            Write-Host "  [DEBUG] Return value count/length: $($documents.Count)" -ForegroundColor Cyan
+            if ($documents -is [string]) {
+                Write-Host "  [DEBUG] WARNING: Return value is a STRING: '$documents'" -ForegroundColor Red
+            }
+
             $documentsToDelete = $documents
             Write-Host "  Found $($documentsToDelete.Count) documents" -ForegroundColor Green
 
@@ -2295,13 +2351,20 @@ function Invoke-BulkDeleteProcesses {
 
     Write-Host "Identified $($processesToDelete.Count) processes to delete" -ForegroundColor Green
 
-    if ($processesToDelete.Count -eq 0) {
-        Write-Host "No processes to delete" -ForegroundColor Yellow
+    # Check if there's anything to delete
+    if ($processesToDelete.Count -eq 0 -and $documentsToDelete.Count -eq 0) {
+        Write-Host "No processes or documents to delete" -ForegroundColor Yellow
         return
     }
 
+    if ($processesToDelete.Count -eq 0) {
+        Write-Host "No processes to delete - skipping process deletion phases" -ForegroundColor Yellow
+        # Skip to document deletion phase (after PHASE 8)
+    }
+
     # Step 1.5: Get unique IDs and numeric IDs for all processes to delete
-    Write-Host "`n=== Getting Process Details ===" -ForegroundColor Cyan
+    if ($processesToDelete.Count -gt 0) {
+        Write-Host "`n=== Getting Process Details ===" -ForegroundColor Cyan
 
     $processDeleteMap = @{}  # Maps any ID to object with {NumericId, UniqueId, GroupUniqueId}
     foreach ($processId in $processesToDelete) {
@@ -2791,6 +2854,7 @@ function Invoke-BulkDeleteProcesses {
     }
 
     Write-Host "`nRe-archived $($restoredDependencies.Count) dependencies" -ForegroundColor Green
+    }  # End of if ($processesToDelete.Count -gt 0)
 
     # Step 8.5: Delete documents (if requested)
     if ($deleteDocuments -and $documentsToDelete.Count -gt 0) {
@@ -2910,14 +2974,16 @@ function Invoke-BulkDeleteProcesses {
         Write-Host "  Skipped: $($documentsSkipped.Count)" -ForegroundColor Yellow
     }
 
-    # Step 9: Clean up temp group
-    Write-Host "`n=== PHASE 9: Cleanup ===" -ForegroundColor Cyan
-    Write-Host "Deleting temporary group (ID: $tempGroupId, UniqueId: $tempGroupUniqueId)..." -ForegroundColor White
+    # Step 9: Clean up temp group (if it was created)
+    if ($processesToDelete.Count -gt 0) {
+        Write-Host "`n=== PHASE 9: Cleanup ===" -ForegroundColor Cyan
+        Write-Host "Deleting temporary group (ID: $tempGroupId, UniqueId: $tempGroupUniqueId)..." -ForegroundColor White
 
-    $deleteSuccess = Delete-ProcessGroup -SiteURL $SiteURL -Token $Token -GroupUniqueId $tempGroupUniqueId
+        $deleteSuccess = Delete-ProcessGroup -SiteURL $SiteURL -Token $Token -GroupUniqueId $tempGroupUniqueId
 
-    if (-not $deleteSuccess) {
-        Write-Host "  Warning: Failed to delete temporary group. You may need to delete it manually." -ForegroundColor Yellow
+        if (-not $deleteSuccess) {
+            Write-Host "  Warning: Failed to delete temporary group. You may need to delete it manually." -ForegroundColor Yellow
+        }
     }
 
     # Save results
@@ -2945,7 +3011,7 @@ function Show-MainMenu {
     Write-Host "  [2] Bulk Restore" -ForegroundColor White
     Write-Host "  [3] Bulk Update Location" -ForegroundColor White
     Write-Host "  [4] Bulk Update Ownership" -ForegroundColor White
-    Write-Host "  [5] Bulk Delete Processes" -ForegroundColor White
+    Write-Host "  [5] Bulk Delete Content" -ForegroundColor White
     Write-Host "  [Q] Quit" -ForegroundColor White
     Write-Host ""
 }
@@ -3098,7 +3164,7 @@ while ($running) {
             Invoke-BulkUpdateOwnership -SiteURL $config.SiteURL -Token $token -CsvPath $csvPath
         }
 
-        '5' {  # Bulk Delete Processes
+        '5' {  # Bulk Delete Content
             $sourceType = Get-SourceType -Mode 5
 
             $tempGroupName = $config.TempGroupName
