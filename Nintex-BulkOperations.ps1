@@ -1637,13 +1637,58 @@ function Remove-ProcessLinksFromJson {
     }
 }
 
+function Remove-InputOutputReferencesFromJson {
+    param(
+        [string]$ProcessJson,
+        [string]$TargetProcessUniqueId
+    )
+
+    # Convert JSON string to object
+    $processObj = $ProcessJson | ConvertFrom-Json
+
+    $referencesRemoved = 0
+
+    # Remove from Inputs - filter out inputs where FromProcessUniqueId matches target
+    if ($processObj.Inputs -and $processObj.Inputs.Input) {
+        $originalCount = @($processObj.Inputs.Input).Count
+        $processObj.Inputs.Input = @($processObj.Inputs.Input | Where-Object {
+            $_.FromProcessUniqueId -ne $TargetProcessUniqueId
+        })
+        $newCount = @($processObj.Inputs.Input).Count
+        $referencesRemoved += ($originalCount - $newCount)
+
+        Write-Host "    Removed $($originalCount - $newCount) input reference(s)" -ForegroundColor Gray
+    }
+
+    # Remove from Outputs - filter out outputs where ToProcessUniqueId matches target
+    if ($processObj.Outputs -and $processObj.Outputs.Output) {
+        $originalCount = @($processObj.Outputs.Output).Count
+        $processObj.Outputs.Output = @($processObj.Outputs.Output | Where-Object {
+            $_.ToProcessUniqueId -ne $TargetProcessUniqueId
+        })
+        $newCount = @($processObj.Outputs.Output).Count
+        $referencesRemoved += ($originalCount - $newCount)
+
+        Write-Host "    Removed $($originalCount - $newCount) output reference(s)" -ForegroundColor Gray
+    }
+
+    # Convert back to JSON string
+    $cleanedJson = $processObj | ConvertTo-Json -Depth 20 -Compress
+
+    return @{
+        CleanedJson = $cleanedJson
+        ReferencesRemoved = $referencesRemoved
+    }
+}
+
 function Update-ProcessAndPublish {
     param(
         [string]$SiteURL,
         [string]$Token,
         [string]$ProcessUniqueId,
         [string]$TargetProcessUniqueId,
-        [bool]$ApprovalsEnabled
+        [bool]$ApprovalsEnabled,
+        [string]$DependencyType = "Linked Process"
     )
 
     try {
@@ -1665,16 +1710,30 @@ function Update-ProcessAndPublish {
 
         Write-Host "  Current version: $($processData.processJson.Version), ProcessRevisionEditId: $processRevisionEditId" -ForegroundColor Gray
 
-        # Step 2: Remove links from JSON
-        Write-Host "  Removing links to process $TargetProcessUniqueId..." -ForegroundColor Gray
-        $result = Remove-ProcessLinksFromJson -ProcessJson $processJson -TargetProcessUniqueId $TargetProcessUniqueId
+        # Step 2: Remove links/references from JSON based on dependency type
+        if ($DependencyType -eq "Process Input" -or $DependencyType -eq "Process Output") {
+            Write-Host "  Removing $DependencyType references to process $TargetProcessUniqueId..." -ForegroundColor Gray
+            $result = Remove-InputOutputReferencesFromJson -ProcessJson $processJson -TargetProcessUniqueId $TargetProcessUniqueId
 
-        if ($result.LinksRemoved -eq 0) {
-            Write-Host "  No links found to remove" -ForegroundColor Yellow
-            return $true
+            if ($result.ReferencesRemoved -eq 0) {
+                Write-Host "  No $DependencyType references found to remove" -ForegroundColor Yellow
+                return $true
+            }
+
+            Write-Host "  Removed $($result.ReferencesRemoved) $DependencyType reference(s)" -ForegroundColor Green
         }
+        else {
+            # Default: Linked Process removal
+            Write-Host "  Removing links to process $TargetProcessUniqueId..." -ForegroundColor Gray
+            $result = Remove-ProcessLinksFromJson -ProcessJson $processJson -TargetProcessUniqueId $TargetProcessUniqueId
 
-        Write-Host "  Removed $($result.LinksRemoved) link(s)" -ForegroundColor Green
+            if ($result.LinksRemoved -eq 0) {
+                Write-Host "  No links found to remove" -ForegroundColor Yellow
+                return $true
+            }
+
+            Write-Host "  Removed $($result.LinksRemoved) link(s)" -ForegroundColor Green
+        }
 
         # Verify ProcessRevisionEditId is preserved in cleaned JSON
         $cleanedObj = $result.CleanedJson | ConvertFrom-Json
@@ -2297,13 +2356,14 @@ function Invoke-BulkDeleteProcesses {
         Write-Host "No dependencies to remove - skipping this phase" -ForegroundColor Green
     } else {
         # Separate dependencies by type
-        $linkedProcessDeps = @()
+        $automaticDeps = @()
         $manualDeps = @()
 
         foreach ($depKey in $dependencyMap.Keys) {
             $dep = $dependencyMap[$depKey]
-            if ($dep.Type -eq "Linked Process") {
-                $linkedProcessDeps += $dep
+            # Automatic removal: Linked Process, Process Input, Process Output
+            if ($dep.Type -eq "Linked Process" -or $dep.Type -eq "Process Input" -or $dep.Type -eq "Process Output") {
+                $automaticDeps += $dep
             }
             else {
                 # All other dependencies (including Linked Process Group) require manual removal
@@ -2311,22 +2371,22 @@ function Invoke-BulkDeleteProcesses {
             }
         }
 
-        # Handle automatic removal of Linked Process dependencies
-        if ($linkedProcessDeps.Count -gt 0) {
-            Write-Host "`n--- Removing Linked Process Dependencies (Automatic) ---" -ForegroundColor Cyan
-            Write-Host "Processing $($linkedProcessDeps.Count) linked process dependencies..." -ForegroundColor White
+        # Handle automatic removal of dependencies (Linked Process, Process Input, Process Output)
+        if ($automaticDeps.Count -gt 0) {
+            Write-Host "`n--- Removing Dependencies (Automatic) ---" -ForegroundColor Cyan
+            Write-Host "Processing $($automaticDeps.Count) dependencies (Linked Process, Process Input, Process Output)..." -ForegroundColor White
 
             $dependenciesProcessed = 0
             $dependenciesSuccessful = 0
             $dependenciesFailed = 0
 
-            foreach ($dep in $linkedProcessDeps) {
+            foreach ($dep in $automaticDeps) {
                 $dependenciesProcessed++
 
                 # Get all processes being deleted that reference this dependency
                 $processesToRemoveFrom = $dep.ReferencedByProcesses
 
-                Write-Host "`n[$dependenciesProcessed/$($linkedProcessDeps.Count)] Processing dependency: $($dep.Name)" -ForegroundColor White
+                Write-Host "`n[$dependenciesProcessed/$($automaticDeps.Count)] Processing $($dep.Type) dependency: $($dep.Name)" -ForegroundColor White
                 Write-Host "  Removing references from $($processesToRemoveFrom.Count) process(es) being deleted" -ForegroundColor Gray
 
                 # For each process being deleted that references this dependency
@@ -2334,13 +2394,14 @@ function Invoke-BulkDeleteProcesses {
                     $processInfo = $processDeleteMap[$processIdToDelete]
                     $processUniqueIdToDelete = $processInfo.UniqueId
 
-                    Write-Host "  Removing link from dependent process: $($dep.Name) ($($dep.UniqueId))" -ForegroundColor White
+                    Write-Host "  Removing $($dep.Type) from dependent process: $($dep.Name) ($($dep.UniqueId))" -ForegroundColor White
                     Write-Host "    Target process to remove: $processUniqueIdToDelete" -ForegroundColor Gray
 
                     $success = Update-ProcessAndPublish -SiteURL $SiteURL -Token $Token `
                         -ProcessUniqueId $dep.UniqueId `
                         -TargetProcessUniqueId $processUniqueIdToDelete `
-                        -ApprovalsEnabled $approvalsEnabled
+                        -ApprovalsEnabled $approvalsEnabled `
+                        -DependencyType $dep.Type
 
                     if ($success) {
                         $dependenciesSuccessful++
@@ -2354,7 +2415,7 @@ function Invoke-BulkDeleteProcesses {
             }
 
             Write-Host "`n=== Automatic Dependency Removal Summary ===" -ForegroundColor Cyan
-            Write-Host "Total linked process dependencies processed: $dependenciesProcessed" -ForegroundColor White
+            Write-Host "Total dependencies processed: $dependenciesProcessed" -ForegroundColor White
             Write-Host "Successful: $dependenciesSuccessful" -ForegroundColor Green
             Write-Host "Failed: $dependenciesFailed" -ForegroundColor $(if ($dependenciesFailed -gt 0) { "Red" } else { "Green" })
 
@@ -2433,9 +2494,9 @@ function Invoke-BulkDeleteProcesses {
                         $stillHasDeps = $false
                         if ($currentDeps -and $currentDeps.Count -gt 0) {
                             foreach ($depType in $currentDeps) {
-                                # Skip only Linked Process (automatically handled)
-                                # Include Linked Process Group since it requires manual removal
-                                if ($depType.Type -ne "Linked Process") {
+                                # Skip automatically handled types: Linked Process, Process Input, Process Output
+                                # Include Linked Process Group and other types since they require manual removal
+                                if ($depType.Type -ne "Linked Process" -and $depType.Type -ne "Process Input" -and $depType.Type -ne "Process Output") {
                                     if ($depType.Dependencies -and $depType.Dependencies.Count -gt 0) {
                                         $stillHasDeps = $true
                                         Write-Host "    WARNING: Process still has $($depType.Dependencies.Count) dependencies of type '$($depType.Type)'" -ForegroundColor Red
