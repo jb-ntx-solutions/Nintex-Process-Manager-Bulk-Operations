@@ -831,45 +831,27 @@ function Invoke-BulkArchive {
         foreach ($processId in $processesToArchive) {
             Write-Host "Archiving Process ID: $processId" -ForegroundColor White
 
-            $archiveUrl = "$SiteURL/Process/Edit/ArchiveProcess?id=$processId"
-            $result = Invoke-ApiPost -Url $archiveUrl -Token $Token
+            # Fetch process details to get uniqueId
+            $verifyUrl = "$SiteURL/Api/v1/Processes/$processId"
+            $process = Invoke-ApiGet -Url $verifyUrl -Token $Token
 
-            if ($result) {
-                # Verify archive
-                $verifyUrl = "$SiteURL/Api/v1/Processes/$processId"
-                $process = Invoke-ApiGet -Url $verifyUrl -Token $Token
+            if ($process -and $process.uniqueId) {
+                $processUniqueId = $process.uniqueId
 
-                if ($process -and $process.isArchived) {
-                    Write-Host "  Success: Process archived" -ForegroundColor Green
-                    $results += [PSCustomObject]@{
-                        ObjectType = "Process"
-                        ObjectID = $processId
-                        Operation = "Archive"
-                        Status = "Success"
-                        Message = "Archived successfully"
-                    }
-                } else {
-                    Write-Host "  Warning: Archive may have failed, trying publish first" -ForegroundColor Yellow
+                # Use Archive-Process helper
+                $result = Archive-Process -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId -Comment "Bulk archive operation"
 
-                    # Try publishing first (for processes in draft state)
-                    $publishUrl = "$SiteURL/Api/v1/Processes/Publish"
-                    $publishBody = @{ id = $processId }
-                    $publishResult = Invoke-ApiPost -Url $publishUrl -Token $Token -Body $publishBody
-
-                    Start-Sleep -Seconds 1
-
-                    # Retry archive
-                    $result = Invoke-ApiPost -Url $archiveUrl -Token $Token
-
+                if ($result) {
+                    # Verify archive
                     $process = Invoke-ApiGet -Url $verifyUrl -Token $Token
                     if ($process -and $process.isArchived) {
-                        Write-Host "  Success: Process archived after publish" -ForegroundColor Green
+                        Write-Host "  Success: Process archived" -ForegroundColor Green
                         $results += [PSCustomObject]@{
                             ObjectType = "Process"
                             ObjectID = $processId
                             Operation = "Archive"
                             Status = "Success"
-                            Message = "Archived after publish"
+                            Message = "Archived successfully"
                         }
                     } else {
                         Write-Host "  Failed: Could not archive process" -ForegroundColor Red
@@ -881,14 +863,23 @@ function Invoke-BulkArchive {
                             Message = "Could not archive"
                         }
                     }
+                } else {
+                    $results += [PSCustomObject]@{
+                        ObjectType = "Process"
+                        ObjectID = $processId
+                        Operation = "Archive"
+                        Status = "Failed"
+                        Message = "Archive API call failed"
+                    }
                 }
             } else {
+                Write-Host "  Failed: Could not retrieve process details" -ForegroundColor Red
                 $results += [PSCustomObject]@{
                     ObjectType = "Process"
                     ObjectID = $processId
                     Operation = "Archive"
                     Status = "Failed"
-                    Message = "Archive API call failed"
+                    Message = "Could not retrieve process"
                 }
             }
         }
@@ -1355,6 +1346,91 @@ function Get-ProcessStatus {
     catch {
         Write-Host "  Error getting status for process $ProcessUniqueId : $($_.Exception.Message)" -ForegroundColor Yellow
         return $null
+    }
+}
+
+function Archive-Process {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$ProcessUniqueId,
+        [string]$Comment = "Bulk operation"
+    )
+
+    try {
+        # Step 1: Archive the process using the correct API format
+        $archiveUrl = "$SiteURL/Process/Edit/ArchiveProcess"
+        $archiveBody = @{
+            processUniqueId = $ProcessUniqueId
+            comment = $Comment
+        }
+
+        $archiveResult = Invoke-ApiPost -Url $archiveUrl -Token $Token -Body $archiveBody
+
+        if (-not $archiveResult) {
+            return $false
+        }
+
+        # Step 2: Check if we need to bypass approval
+        # After archiving, the process might be in a pending approval state
+        # We need to call the Publish endpoint to complete the archive
+
+        # Get the current process data to get ProcessRevisionEditId
+        $getUrl = "$SiteURL/Api/v1/Processes/$ProcessUniqueId"
+        $processData = Invoke-ApiGet -Url $getUrl -Token $Token
+
+        if ($processData -and $processData.processJson -and $processData.processJson.ProcessRevisionEditId) {
+            $processRevisionEditId = $processData.processJson.ProcessRevisionEditId
+
+            # Call the publish/approval bypass endpoint
+            $publishUrl = "$SiteURL/Api/v1/Processes/$ProcessUniqueId/Publish"
+            $publishBody = @{
+                ProcessRevisionEditId = $processRevisionEditId
+                IsPublishNow = $true
+            }
+
+            Invoke-ApiPost -Url $publishUrl -Token $Token -Body $publishBody | Out-Null
+        }
+
+        return $true
+    }
+    catch {
+        Write-Host "  Archive error: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+}
+
+function Delete-Process {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$ProcessUniqueId,
+        [string]$ProcessGroupUniqueId
+    )
+
+    try {
+        # Delete the process using the correct API format
+        $deleteUrl = "$SiteURL/Process/Edit/DeleteProcess"
+        $deleteBody = @{
+            processUniqueId = $ProcessUniqueId
+        }
+
+        # Add processGroupUniqueId if available
+        if ($ProcessGroupUniqueId) {
+            $deleteBody.processGroupUniqueId = $ProcessGroupUniqueId
+        }
+
+        $deleteResult = Invoke-ApiPost -Url $deleteUrl -Token $Token -Body $deleteBody
+
+        if ($deleteResult -ne $null) {
+            return $true
+        } else {
+            return $false
+        }
+    }
+    catch {
+        Write-Host "  Delete error: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
     }
 }
 
@@ -1972,35 +2048,49 @@ function Invoke-BulkDeleteProcesses {
     # Step 1.5: Get unique IDs and numeric IDs for all processes to delete
     Write-Host "`n=== Getting Process Details ===" -ForegroundColor Cyan
 
-    $processDeleteMap = @{}  # Maps any ID to object with {NumericId, UniqueId}
+    $processDeleteMap = @{}  # Maps any ID to object with {NumericId, UniqueId, GroupUniqueId}
     foreach ($processId in $processesToDelete) {
         # Check if the ID is already a GUID (UniqueId) or a numeric ID
         $guidRegex = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 
         if ($processId -match $guidRegex) {
-            # It's already a UniqueId (GUID format), need to fetch numeric ID
-            Write-Host "  Process UniqueId: $processId (fetching numeric ID)" -ForegroundColor Gray
+            # It's already a UniqueId (GUID format), need to fetch numeric ID and group info
+            Write-Host "  Process UniqueId: $processId (fetching numeric ID and group)" -ForegroundColor Gray
             $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processId
             if ($processStatus -and $processStatus.ProcessModel) {
                 $numericId = $processStatus.ProcessModel.Id
+                $groupUniqueId = if ($processStatus.ProcessModel.GroupUniqueId) {
+                    $processStatus.ProcessModel.GroupUniqueId
+                } else {
+                    $null
+                }
                 $processDeleteMap[$processId] = @{
                     NumericId = $numericId
                     UniqueId = $processId
+                    GroupUniqueId = $groupUniqueId
                 }
-                Write-Host "    -> Numeric ID: $numericId" -ForegroundColor Gray
+                Write-Host "    -> Numeric ID: $numericId, GroupUniqueId: $groupUniqueId" -ForegroundColor Gray
             } else {
-                Write-Host "  Warning: Could not retrieve numeric ID for UniqueId $processId" -ForegroundColor Yellow
+                Write-Host "  Warning: Could not retrieve process details for UniqueId $processId" -ForegroundColor Yellow
             }
         } else {
-            # It's a numeric ID, fetch the process to get the UniqueId
+            # It's a numeric ID, fetch the process to get the UniqueId and group info
             $getUrl = "$SiteURL/Api/v1/Processes/$processId"
             $process = Invoke-ApiGet -Url $getUrl -Token $Token
             if ($process -and $process.uniqueId) {
+                # Get the process status to retrieve group information
+                $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $process.uniqueId
+                $groupUniqueId = if ($processStatus -and $processStatus.ProcessModel.GroupUniqueId) {
+                    $processStatus.ProcessModel.GroupUniqueId
+                } else {
+                    $null
+                }
                 $processDeleteMap[$processId] = @{
                     NumericId = $processId
                     UniqueId = $process.uniqueId
+                    GroupUniqueId = $groupUniqueId
                 }
-                Write-Host "  Process ID $processId -> UniqueId: $($process.uniqueId)" -ForegroundColor Gray
+                Write-Host "  Process ID $processId -> UniqueId: $($process.uniqueId), GroupUniqueId: $groupUniqueId" -ForegroundColor Gray
             } else {
                 Write-Host "  Warning: Could not retrieve process details for ID $processId" -ForegroundColor Yellow
             }
@@ -2406,8 +2496,7 @@ function Invoke-BulkDeleteProcesses {
             Write-Host "Process $processNumericId is already archived - skipping" -ForegroundColor Gray
         } else {
             Write-Host "Archiving Process $processNumericId" -ForegroundColor White
-            $archiveUrl = "$SiteURL/Process/Edit/ArchiveProcess?id=$processNumericId"
-            Invoke-ApiPost -Url $archiveUrl -Token $Token | Out-Null
+            Archive-Process -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId -Comment "Pre-delete archive" | Out-Null
         }
     }
 
@@ -2424,11 +2513,11 @@ function Invoke-BulkDeleteProcesses {
         $processInfo = $processDeleteMap[$processKey]
         $processNumericId = $processInfo.NumericId
         $processUniqueId = $processInfo.UniqueId
+        $processGroupUniqueId = $processInfo.GroupUniqueId
 
         Write-Host "Deleting Process $processNumericId (UniqueId: $processUniqueId)" -ForegroundColor Red
 
-        $deleteUrl = "$SiteURL/Process/Edit/DeleteProcess?id=$processNumericId"
-        $result = Invoke-ApiPost -Url $deleteUrl -Token $Token
+        $result = Delete-Process -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId -ProcessGroupUniqueId $processGroupUniqueId
 
         if ($result) {
             $results += [PSCustomObject]@{
@@ -2463,8 +2552,7 @@ function Invoke-BulkDeleteProcesses {
     foreach ($restoredDep in $restoredDependencies) {
         Write-Host "Re-archiving dependency: $($restoredDep.Name) (ID: $($restoredDep.NumericId))" -ForegroundColor White
 
-        $archiveUrl = "$SiteURL/Process/Edit/ArchiveProcess?id=$($restoredDep.NumericId)"
-        $result = Invoke-ApiPost -Url $archiveUrl -Token $Token
+        $result = Archive-Process -SiteURL $SiteURL -Token $Token -ProcessUniqueId $restoredDep.UniqueId -Comment "Re-archiving after dependency cleanup"
 
         if ($result) {
             Write-Host "  Successfully re-archived" -ForegroundColor Green
