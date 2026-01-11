@@ -1378,6 +1378,40 @@ function Archive-Process {
     }
 }
 
+function Delete-Process {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$ProcessUniqueId,
+        [string]$ProcessGroupUniqueId
+    )
+
+    try {
+        # Delete the process using the correct API format
+        $deleteUrl = "$SiteURL/Process/Edit/DeleteProcess"
+        $deleteBody = @{
+            processUniqueId = $ProcessUniqueId
+        }
+
+        # Add processGroupUniqueId if available
+        if ($ProcessGroupUniqueId) {
+            $deleteBody.processGroupUniqueId = $ProcessGroupUniqueId
+        }
+
+        $deleteResult = Invoke-ApiPost -Url $deleteUrl -Token $Token -Body $deleteBody
+
+        if ($deleteResult -ne $null) {
+            return $true
+        } else {
+            return $false
+        }
+    }
+    catch {
+        Write-Host "  Delete error: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+}
+
 function Remove-ProcessLinksFromJson {
     param(
         [string]$ProcessJson,
@@ -1838,13 +1872,24 @@ function Invoke-BulkDeleteProcesses {
     # Step 1.5: Get unique IDs for all processes to delete
     Write-Host "`n=== Getting Process Details ===" -ForegroundColor Cyan
 
-    $processDeleteMap = @{}  # Maps numeric ID to UniqueId
+    $processDeleteMap = @{}  # Maps numeric ID to process details (UniqueId, GroupUniqueId)
     foreach ($processId in $processesToDelete) {
         $getUrl = "$SiteURL/Api/v1/Processes/$processId"
         $process = Invoke-ApiGet -Url $getUrl -Token $Token
         if ($process -and $process.uniqueId) {
-            $processDeleteMap[$processId] = $process.uniqueId
-            Write-Host "  Process ID $processId -> UniqueId: $($process.uniqueId)" -ForegroundColor Gray
+            # Get the process status to retrieve group information
+            $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $process.uniqueId
+            $groupUniqueId = if ($processStatus -and $processStatus.ProcessModel.GroupUniqueId) {
+                $processStatus.ProcessModel.GroupUniqueId
+            } else {
+                $null
+            }
+
+            $processDeleteMap[$processId] = @{
+                UniqueId = $process.uniqueId
+                GroupUniqueId = $groupUniqueId
+            }
+            Write-Host "  Process ID $processId -> UniqueId: $($process.uniqueId), GroupUniqueId: $groupUniqueId" -ForegroundColor Gray
         }
     }
 
@@ -1855,7 +1900,7 @@ function Invoke-BulkDeleteProcesses {
     $dependencyMap = @{}    # Map to track unique dependencies by UniqueId
 
     foreach ($processId in $processDeleteMap.Keys) {
-        $processUniqueId = $processDeleteMap[$processId]
+        $processUniqueId = $processDeleteMap[$processId].UniqueId
         Write-Host "Checking dependencies for Process ID $processId (UniqueId: $processUniqueId)..." -ForegroundColor White
 
         $dependencies = Get-ProcessDependencies -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId
@@ -2042,7 +2087,7 @@ function Invoke-BulkDeleteProcesses {
 
                 # For each process being deleted that references this dependency
                 foreach ($processIdToDelete in $processesToRemoveFrom) {
-                    $processUniqueIdToDelete = $processDeleteMap[$processIdToDelete]
+                    $processUniqueIdToDelete = $processDeleteMap[$processIdToDelete].UniqueId
 
                     Write-Host "  Removing link from dependent process: $($dep.Name) ($($dep.UniqueId))" -ForegroundColor White
 
@@ -2108,7 +2153,7 @@ function Invoke-BulkDeleteProcesses {
 
             # Display dependencies grouped by process
             foreach ($processIdToDelete in $manualDepsByProcess.Keys) {
-                $processUniqueIdToDelete = $processDeleteMap[$processIdToDelete]
+                $processUniqueIdToDelete = $processDeleteMap[$processIdToDelete].UniqueId
                 $deps = $manualDepsByProcess[$processIdToDelete]
 
                 Write-Host "Process to be deleted: ID $processIdToDelete (UniqueId: $processUniqueIdToDelete)" -ForegroundColor White
@@ -2202,7 +2247,7 @@ function Invoke-BulkDeleteProcesses {
     }
 
     foreach ($processId in $processesToDelete) {
-        $processUniqueId = $processDeleteMap[$processId]
+        $processUniqueId = $processDeleteMap[$processId].UniqueId
 
         # Check if process is already archived
         $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId
@@ -2225,10 +2270,12 @@ function Invoke-BulkDeleteProcesses {
     }
 
     foreach ($processId in $processesToDelete) {
-        Write-Host "Deleting Process $processId" -ForegroundColor Red
+        $processUniqueId = $processDeleteMap[$processId].UniqueId
+        $processGroupUniqueId = $processDeleteMap[$processId].GroupUniqueId
 
-        $deleteUrl = "$SiteURL/Process/Edit/DeleteProcess?id=$processId"
-        $result = Invoke-ApiPost -Url $deleteUrl -Token $Token
+        Write-Host "Deleting Process $processId (UniqueId: $processUniqueId)" -ForegroundColor Red
+
+        $result = Delete-Process -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId -ProcessGroupUniqueId $processGroupUniqueId
 
         if ($result) {
             $results += [PSCustomObject]@{
