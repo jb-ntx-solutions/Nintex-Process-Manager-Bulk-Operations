@@ -86,12 +86,19 @@ function Invoke-ApiGet {
     )
 
     try {
+        # V2: Added X-Requested-With header for BFF APIs
         $headers = @{
             "Authorization" = "Bearer $Token"
             "Accept" = "application/json"
             "Content-Type" = "application/json"
             "X-Requested-With" = "XMLHttpRequest"
         }
+
+        # Debug: Show we're using the new version
+        if ($Url -like "*bff/document*") {
+            Write-Host "  [INVOKE-APIGET V2] Calling with X-Requested-With header" -ForegroundColor DarkGreen
+        }
+
         return Invoke-RestMethod -Uri $Url -Method Get -Headers $headers
     }
     catch {
