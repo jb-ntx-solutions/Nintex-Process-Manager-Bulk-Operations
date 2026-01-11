@@ -85,6 +85,9 @@ function Invoke-ApiGet {
         [string]$Token
     )
 
+    # ALWAYS show we're in the V2.1 function
+    Write-Host "  [INVOKE-APIGET V2.1 ENTRY] URL: $Url" -ForegroundColor Cyan
+
     try {
         # V2: Added X-Requested-With header for BFF APIs
         $headers = @{
@@ -94,15 +97,22 @@ function Invoke-ApiGet {
             "X-Requested-With" = "XMLHttpRequest"
         }
 
-        # Debug: Show we're using the new version
-        if ($Url -like "*bff/document*") {
-            Write-Host "  [INVOKE-APIGET V2] Calling with X-Requested-With header" -ForegroundColor DarkGreen
+        # Debug: Confirm headers for BFF calls
+        if ($Url -like "*bff/*") {
+            Write-Host "  [INVOKE-APIGET V2.1] BFF API detected - using X-Requested-With header" -ForegroundColor DarkGreen
+            Write-Host "  [INVOKE-APIGET V2.1] Headers: Authorization=Bearer ***, Accept=application/json, Content-Type=application/json, X-Requested-With=XMLHttpRequest" -ForegroundColor DarkGray
         }
 
-        return Invoke-RestMethod -Uri $Url -Method Get -Headers $headers
+        $response = Invoke-RestMethod -Uri $Url -Method Get -Headers $headers
+
+        # Debug: Check response type
+        $responseType = $response.GetType().Name
+        Write-Host "  [INVOKE-APIGET V2.1] Response type: $responseType" -ForegroundColor DarkGray
+
+        return $response
     }
     catch {
-        Write-Host "API GET Error ($Url): $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  [INVOKE-APIGET V2.1 ERROR] $($_.Exception.Message)" -ForegroundColor Red
         return $null
     }
 }
