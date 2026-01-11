@@ -1335,11 +1335,12 @@ function Get-ProcessStatus {
     )
 
     try {
-        $url = "$SiteURL/mobile/api/v1/processes?processUniqueIds=$ProcessUniqueId"
+        # Use the regular API endpoint to get current working state (not cached published state)
+        $url = "$SiteURL/Api/v1/Processes/$ProcessUniqueId"
         $response = Invoke-ApiGet -Url $url -Token $Token
 
-        if ($response -and $response.data -and $response.data.Count -gt 0) {
-            return $response.data[0]
+        if ($response -and $response.processJson) {
+            return $response.processJson
         }
         return $null
     }
@@ -2116,10 +2117,10 @@ function Invoke-BulkDeleteProcesses {
             # It's already a UniqueId (GUID format), need to fetch numeric ID and group info
             Write-Host "  Process UniqueId: $processId (fetching numeric ID and group)" -ForegroundColor Gray
             $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processId
-            if ($processStatus -and $processStatus.ProcessModel) {
-                $numericId = $processStatus.ProcessModel.Id
-                $groupUniqueId = if ($processStatus.ProcessModel.GroupUniqueId) {
-                    $processStatus.ProcessModel.GroupUniqueId
+            if ($processStatus) {
+                $numericId = $processStatus.Id
+                $groupUniqueId = if ($processStatus.GroupUniqueId) {
+                    $processStatus.GroupUniqueId
                 } else {
                     $null
                 }
@@ -2139,8 +2140,8 @@ function Invoke-BulkDeleteProcesses {
             if ($process -and $process.uniqueId) {
                 # Get the process status to retrieve group information
                 $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $process.uniqueId
-                $groupUniqueId = if ($processStatus -and $processStatus.ProcessModel.GroupUniqueId) {
-                    $processStatus.ProcessModel.GroupUniqueId
+                $groupUniqueId = if ($processStatus -and $processStatus.GroupUniqueId) {
+                    $processStatus.GroupUniqueId
                 } else {
                     $null
                 }
@@ -2307,8 +2308,8 @@ function Invoke-BulkDeleteProcesses {
             $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $dep.UniqueId
 
             if ($processStatus) {
-                $state = $processStatus.ProcessModel.State
-                $numericId = $processStatus.ProcessModel.Id
+                $state = $processStatus.State
+                $numericId = $processStatus.Id
 
                 Write-Host "  Status: $state (Numeric ID: $numericId)" -ForegroundColor Gray
 
@@ -2551,7 +2552,7 @@ function Invoke-BulkDeleteProcesses {
         # Check if process is already archived
         $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId
 
-        if ($processStatus -and $processStatus.ProcessModel.State -eq "Archived") {
+        if ($processStatus -and $processStatus.State -eq "Archived") {
             Write-Host "Process $processNumericId is already archived - skipping" -ForegroundColor Gray
         } else {
             Write-Host "Archiving Process $processNumericId" -ForegroundColor White
