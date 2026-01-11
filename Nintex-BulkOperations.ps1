@@ -1,5 +1,5 @@
 # Nintex Process Manager Bulk Operations Script
-# Version 2.4 (Clean Output)
+# Version 2.7 (Progress Counters)
 # Supports: Archive, Restore, Update Location, Update Ownership, and Delete operations
 
 #Requires -Version 5.1
@@ -264,8 +264,6 @@ function Get-ProcessesFromGroup {
         [bool]$IncludeSubgroups = $true
     )
 
-    Write-Host "  Looking for processes in group (Include subgroups: $IncludeSubgroups)" -ForegroundColor Gray
-
     if (-not $GroupUniqueId) {
         Write-Host "  Error: GroupUniqueId is required for efficient group querying" -ForegroundColor Red
         return @()
@@ -276,7 +274,6 @@ function Get-ProcessesFromGroup {
     # Use the breadcrumb/children endpoint for efficient server-side filtering
     # This returns only the direct children of the specified group
     $url = "$SiteURL/bff/navigation/api/v1/breadcrumb/children?type=ProcessGroup&id=$GroupUniqueId"
-    Write-Host "    Fetching children of group..." -ForegroundColor Gray
 
     $response = Invoke-ApiGet -Url $url -Token $Token
 
@@ -285,8 +282,6 @@ function Get-ProcessesFromGroup {
         $processes = $response.breadcrumbItems | Where-Object { $_.type -eq "Process" }
 
         if ($processes) {
-            Write-Host "    Found $($processes.Count) processes in this group" -ForegroundColor Gray
-
             # Map breadcrumb format to expected format
             # The breadcrumb 'id' is the process unique ID
             $allProcesses += $processes | ForEach-Object {
@@ -304,8 +299,6 @@ function Get-ProcessesFromGroup {
             $subgroups = $response.breadcrumbItems | Where-Object { $_.type -eq "ProcessGroup" }
 
             if ($subgroups) {
-                Write-Host "    Found $($subgroups.Count) subgroups, checking recursively..." -ForegroundColor Gray
-
                 foreach ($subgroup in $subgroups) {
                     $subgroupProcesses = Get-ProcessesFromGroup -SiteURL $SiteURL -Token $Token `
                         -GroupID 0 -GroupUniqueId $subgroup.id -IncludeSubgroups $true
@@ -315,7 +308,6 @@ function Get-ProcessesFromGroup {
         }
     }
 
-    Write-Host "  Total processes found: $($allProcesses.Count)" -ForegroundColor Green
     return $allProcesses
 }
 
@@ -599,7 +591,6 @@ function Get-ProcessGroups {
         Write-Host "Fetching group tree from Process Manager..." -ForegroundColor Cyan
 
         # Get root groups by calling GetChildProcessGroupTreeItems without uniqueId parameter
-        Write-Host "  Getting root groups..." -ForegroundColor Gray
         $url = "$SiteURL/Process/View/GetChildProcessGroupTreeItems"
         $response = Invoke-ApiGet -Url $url -Token $Token
 
@@ -613,13 +604,14 @@ function Get-ProcessGroups {
             $_.itemType -eq "group" -or $_.itemType -eq "documentgroup"
         }
 
-        Write-Host "  Found $($rootGroups.Count) root groups" -ForegroundColor Green
-
         # Now recursively fetch the full tree for each root group
         $allGroups = @{}
+        $currentIndex = 0
+        $totalRootGroups = $rootGroups.Count
 
         foreach ($rootGroup in $rootGroups) {
-            Write-Host "  Fetching tree for: $($rootGroup.title)..." -ForegroundColor Gray
+            $currentIndex++
+            Write-Host "`r  Fetching group tree $currentIndex out of $totalRootGroups..." -NoNewline -ForegroundColor Gray
 
             # Add root group
             $allGroups[$rootGroup.id] = @{
@@ -639,6 +631,7 @@ function Get-ProcessGroups {
                     -AllGroups ([ref]$allGroups)
             }
         }
+        Write-Host ""  # New line after progress counter
 
         Write-Host "Successfully fetched $($allGroups.Count) groups total" -ForegroundColor Green
         return $allGroups.Values | Sort-Object -Property itemOrder
@@ -2419,19 +2412,37 @@ function Invoke-BulkDeleteProcesses {
     if ($dependencyMap.Count -eq 0) {
         Write-Host "No dependencies found - processes can be deleted directly" -ForegroundColor Green
     } else {
-        Write-Host "Found $($dependencyMap.Count) unique dependencies:" -ForegroundColor Yellow
-        $archivedCount = ($dependencyMap.Values | Where-Object { $_.IsArchived -eq $true }).Count
-        if ($archivedCount -gt 0) {
-            Write-Host "  ($archivedCount will be temporarily restored for link removal)" -ForegroundColor Cyan
-        }
+        # Export dependencies to CSV file
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        $dependenciesFile = "Dependencies_$timestamp.csv"
 
+        $dependencyExport = @()
         foreach ($depKey in $dependencyMap.Keys) {
             $dep = $dependencyMap[$depKey]
             $refCount = $dep.ReferencedByProcesses.Count
-            $archivedLabel = if ($dep.IsArchived) { " [Archived]" } else { "" }
-            Write-Host "  [$($dep.Type)]$archivedLabel $($dep.Name)" -ForegroundColor White
-            Write-Host "    Referenced by $refCount process(es) being deleted" -ForegroundColor Gray
+
+            # Get list of processes that reference this dependency
+            $referencingProcesses = $dep.ReferencedByProcesses -join "; "
+
+            $dependencyExport += [PSCustomObject]@{
+                Type = $dep.Type
+                Name = $dep.Name
+                UniqueId = $dep.UniqueId
+                IsArchived = $dep.IsArchived
+                ReferencedByCount = $refCount
+                ReferencingProcesses = $referencingProcesses
+            }
         }
+
+        $dependencyExport | Export-Csv -Path $dependenciesFile -NoTypeInformation
+
+        $archivedCount = ($dependencyMap.Values | Where-Object { $_.IsArchived -eq $true }).Count
+
+        Write-Host "Found $($dependencyMap.Count) unique dependencies" -ForegroundColor Yellow
+        if ($archivedCount -gt 0) {
+            Write-Host "  ($archivedCount will be temporarily restored for link removal)" -ForegroundColor Cyan
+        }
+        Write-Host "Dependencies exported to: $dependenciesFile" -ForegroundColor Cyan
 
         $proceed = Read-Host "`nDo you want to proceed with dependency removal? (Y/N)"
         if ($proceed -ne 'Y') {
@@ -2718,21 +2729,25 @@ function Invoke-BulkDeleteProcesses {
     # Step 6: Archive processes (skipping ownership update as it's not needed with bypass approvals)
     Write-Host "`n=== PHASE 6: Archiving Processes ===" -ForegroundColor Cyan
 
+    $currentIndex = 0
+    $totalProcesses = $processDeleteMap.Keys.Count
+
     foreach ($processKey in $processDeleteMap.Keys) {
         $processInfo = $processDeleteMap[$processKey]
         $processNumericId = $processInfo.NumericId
         $processUniqueId = $processInfo.UniqueId
 
+        $currentIndex++
+        Write-Host "`r  Archiving $currentIndex out of $totalProcesses..." -NoNewline -ForegroundColor Gray
+
         # Check if process is already archived
         $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId
 
-        if ($processStatus -and $processStatus.State -eq "Archived") {
-            Write-Host "Process $processNumericId is already archived - skipping" -ForegroundColor Gray
-        } else {
-            Write-Host "Archiving Process $processNumericId" -ForegroundColor White
+        if ($processStatus -and $processStatus.State -ne "Archived") {
             Archive-Process -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId -Comment "Pre-delete archive" | Out-Null
         }
     }
+    Write-Host ""  # New line after progress counter
 
     # Step 7: Delete processes
     Write-Host "`n=== PHASE 7: Deleting Processes ===" -ForegroundColor Cyan
@@ -2743,13 +2758,17 @@ function Invoke-BulkDeleteProcesses {
         return
     }
 
+    $currentIndex = 0
+    $totalProcesses = $processDeleteMap.Keys.Count
+
     foreach ($processKey in $processDeleteMap.Keys) {
         $processInfo = $processDeleteMap[$processKey]
         $processNumericId = $processInfo.NumericId
         $processUniqueId = $processInfo.UniqueId
         $processGroupUniqueId = $processInfo.GroupUniqueId
 
-        Write-Host "Deleting Process $processNumericId (UniqueId: $processUniqueId)" -ForegroundColor Red
+        $currentIndex++
+        Write-Host "`r  Deleting $currentIndex out of $totalProcesses..." -NoNewline -ForegroundColor Red
 
         $result = Delete-Process -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId -ProcessGroupUniqueId $processGroupUniqueId
 
@@ -2771,25 +2790,29 @@ function Invoke-BulkDeleteProcesses {
             }
         }
     }
+    Write-Host ""  # New line after progress counter
 
     Write-Host "`nProcesses deleted. Total: $($results.Count)" -ForegroundColor Cyan
 
     # Step 8: Re-archive temporarily restored dependencies
     Write-Host "`n=== PHASE 8: Re-archiving Temporarily Restored Dependencies ===" -ForegroundColor Cyan
 
-    foreach ($restoredDep in $restoredDependencies) {
-        Write-Host "Re-archiving dependency: $($restoredDep.Name) (ID: $($restoredDep.NumericId))" -ForegroundColor White
+    if ($restoredDependencies.Count -gt 0) {
+        $currentIndex = 0
+        $totalDependencies = $restoredDependencies.Count
 
-        $result = Archive-Process -SiteURL $SiteURL -Token $Token -ProcessUniqueId $restoredDep.UniqueId -Comment "Re-archiving after dependency cleanup"
+        foreach ($restoredDep in $restoredDependencies) {
+            $currentIndex++
+            Write-Host "`r  Re-archiving $currentIndex out of $totalDependencies..." -NoNewline -ForegroundColor Gray
 
-        if ($result) {
-            Write-Host "  Successfully re-archived" -ForegroundColor Green
-        } else {
-            Write-Host "  Failed to re-archive - may need manual cleanup" -ForegroundColor Yellow
+            $result = Archive-Process -SiteURL $SiteURL -Token $Token -ProcessUniqueId $restoredDep.UniqueId -Comment "Re-archiving after dependency cleanup"
         }
-    }
+        Write-Host ""  # New line after progress counter
 
-    Write-Host "`nRe-archived $($restoredDependencies.Count) dependencies" -ForegroundColor Green
+        Write-Host "`nRe-archived $($restoredDependencies.Count) dependencies" -ForegroundColor Green
+    } else {
+        Write-Host "No dependencies to re-archive" -ForegroundColor Gray
+    }
     }  # End of if ($processesToDelete.Count -gt 0)
 
     # Step 8.5: Delete documents (if requested)
@@ -2801,10 +2824,12 @@ function Invoke-BulkDeleteProcesses {
         $documentsSkipped = @()
 
         # Check each document for attached processes
+        $currentIndex = 0
+        $totalDocuments = $documentsToDelete.Count
+
         foreach ($doc in $documentsToDelete) {
             # Validate document has required properties
             if (-not $doc.documentId -or $doc.documentId -eq 0) {
-                Write-Host "  Skipping document with invalid/missing ID" -ForegroundColor Yellow
                 $documentsSkipped += [PSCustomObject]@{
                     DocumentId = 0
                     DocumentName = "Unknown"
@@ -2814,12 +2839,12 @@ function Invoke-BulkDeleteProcesses {
                 continue
             }
 
-            Write-Host "  Checking document: $($doc.documentName) (ID: $($doc.documentId))" -ForegroundColor White
+            $currentIndex++
+            Write-Host "`r  Checking documents $currentIndex out of $totalDocuments..." -NoNewline -ForegroundColor Gray
 
             $hasAttachedProcesses = Test-DocumentHasAttachedProcesses -SiteURL $SiteURL -Token $Token -DocumentId $doc.documentId
 
             if ($hasAttachedProcesses) {
-                Write-Host "    Skipping - has attached processes" -ForegroundColor Yellow
                 $documentsSkipped += [PSCustomObject]@{
                     DocumentId = $doc.documentId
                     DocumentName = $doc.documentName
@@ -2828,9 +2853,9 @@ function Invoke-BulkDeleteProcesses {
                 }
             } else {
                 $documentsToArchive += $doc
-                Write-Host "    Eligible for deletion" -ForegroundColor Gray
             }
         }
+        Write-Host ""  # New line after progress counter
 
         Write-Host "`nDocuments eligible for deletion: $($documentsToArchive.Count)" -ForegroundColor Green
         Write-Host "Documents skipped: $($documentsSkipped.Count)" -ForegroundColor Yellow
@@ -2840,18 +2865,22 @@ function Invoke-BulkDeleteProcesses {
             Write-Host "`n  Archiving documents..." -ForegroundColor Gray
             $archivedCount = 0
             $archiveFailedCount = 0
+            $currentIndex = 0
+            $totalDocuments = $documentsToArchive.Count
 
             foreach ($doc in $documentsToArchive) {
-                Write-Host "    Archiving: $($doc.documentName)" -ForegroundColor White
+                $currentIndex++
+                Write-Host "`r    Archiving $currentIndex out of $totalDocuments..." -NoNewline -ForegroundColor Gray
+
                 $archiveResult = Invoke-ArchiveDocument -SiteURL $SiteURL -Token $Token -DocumentId $doc.documentId
 
                 if ($archiveResult) {
                     $archivedCount++
                 } else {
-                    Write-Host "      Failed to archive" -ForegroundColor Red
                     $archiveFailedCount++
                 }
             }
+            Write-Host ""  # New line after progress counter
 
             Write-Host "  Archived: $archivedCount, Failed: $archiveFailedCount" -ForegroundColor Gray
 
@@ -3020,7 +3049,7 @@ Clear-Host
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  NINTEX PROCESS MANAGER BULK OPERATIONS" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  Version 2.4 (Clean Output)" -ForegroundColor Yellow
+Write-Host "  Version 2.7 (Progress Counters)" -ForegroundColor Yellow
 Write-Host "  Script loaded: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Yellow
 Write-Host ""
 
