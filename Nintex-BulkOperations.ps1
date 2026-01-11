@@ -283,6 +283,11 @@ function Get-DocumentsFromGroup {
         [bool]$IncludeSubgroups = $true
     )
 
+    Write-Host "  [DEBUG] *** Get-DocumentsFromGroup ENTRY ***" -ForegroundColor Magenta
+    Write-Host "  [DEBUG] GroupUniqueId parameter: '$GroupUniqueId'" -ForegroundColor Magenta
+    Write-Host "  [DEBUG] GroupUniqueId is null/empty: $([string]::IsNullOrEmpty($GroupUniqueId))" -ForegroundColor Magenta
+    Write-Host "  [DEBUG] IncludeSubgroups: $IncludeSubgroups" -ForegroundColor Magenta
+
     Write-Host "  Fetching documents from group (Include subgroups: $IncludeSubgroups)..." -ForegroundColor Gray
 
     if (-not $GroupUniqueId) {
@@ -2305,7 +2310,19 @@ function Invoke-BulkDeleteProcesses {
         # If deleting documents, fetch them now
         if ($deleteDocuments) {
             Write-Host "`n  Fetching documents..." -ForegroundColor Gray
+            Write-Host "  [DEBUG] *** BEFORE calling Get-DocumentsFromGroup ***" -ForegroundColor Cyan
+            Write-Host "  [DEBUG] GroupUniqueId to pass: '$GroupUniqueId'" -ForegroundColor Cyan
+            Write-Host "  [DEBUG] IncludeSubgroups to pass: $includeSubgroups" -ForegroundColor Cyan
+
             $documents = Get-DocumentsFromGroup -SiteURL $SiteURL -Token $Token -GroupUniqueId $GroupUniqueId -IncludeSubgroups $includeSubgroups
+
+            Write-Host "  [DEBUG] *** AFTER calling Get-DocumentsFromGroup ***" -ForegroundColor Cyan
+            Write-Host "  [DEBUG] Return value type: $($documents.GetType().Name)" -ForegroundColor Cyan
+            Write-Host "  [DEBUG] Return value count/length: $($documents.Count)" -ForegroundColor Cyan
+            if ($documents -is [string]) {
+                Write-Host "  [DEBUG] WARNING: Return value is a STRING: '$documents'" -ForegroundColor Red
+            }
+
             $documentsToDelete = $documents
             Write-Host "  Found $($documentsToDelete.Count) documents" -ForegroundColor Green
 
