@@ -141,28 +141,43 @@ function Invoke-ApiPost {
             Write-Host "  [INVOKE-APIPOST V2.2] Headers: Authorization=Bearer ***, Accept=application/json, Content-Type=application/json, X-Requested-With=XMLHttpRequest" -ForegroundColor DarkGray
         }
 
+        # Use Invoke-WebRequest to get status code
         if ($Body) {
             $jsonBody = $Body | ConvertTo-Json -Depth 10
             Write-Host "  [INVOKE-APIPOST V2.2] Request body: $jsonBody" -ForegroundColor DarkGray
-            $response = Invoke-RestMethod -Uri $Url -Method Post -Headers $headers -Body $jsonBody
+            $webResponse = Invoke-WebRequest -Uri $Url -Method Post -Headers $headers -Body $jsonBody -UseBasicParsing
         } else {
             Write-Host "  [INVOKE-APIPOST V2.2] No body (empty POST)" -ForegroundColor DarkGray
-            $response = Invoke-RestMethod -Uri $Url -Method Post -Headers $headers
+            $webResponse = Invoke-WebRequest -Uri $Url -Method Post -Headers $headers -UseBasicParsing
         }
 
-        # Debug: Check response type
-        $responseType = if ($response) { $response.GetType().Name } else { "null" }
-        Write-Host "  [INVOKE-APIPOST V2.2] Response type: $responseType" -ForegroundColor DarkGray
-        if ($response) {
-            Write-Host "  [INVOKE-APIPOST V2.2] Response: $($response | ConvertTo-Json -Compress -Depth 2)" -ForegroundColor DarkGray
-        }
+        # Check status code
+        $statusCode = $webResponse.StatusCode
+        Write-Host "  [INVOKE-APIPOST V2.2] HTTP Status Code: $statusCode" -ForegroundColor DarkGray
 
-        return $response
+        # 200-299 are success codes
+        if ($statusCode -ge 200 -and $statusCode -lt 300) {
+            if ($webResponse.Content) {
+                $response = $webResponse.Content | ConvertFrom-Json
+                Write-Host "  [INVOKE-APIPOST V2.2] Response type: $($response.GetType().Name)" -ForegroundColor DarkGray
+                Write-Host "  [INVOKE-APIPOST V2.2] Response: $($response | ConvertTo-Json -Compress -Depth 2)" -ForegroundColor DarkGray
+                return $response
+            } else {
+                # 204 No Content or other success with no body - return success indicator
+                Write-Host "  [INVOKE-APIPOST V2.2] Success with no content (HTTP $statusCode)" -ForegroundColor DarkGreen
+                return @{ success = $true; statusCode = $statusCode }
+            }
+        } else {
+            Write-Host "  [INVOKE-APIPOST V2.2 WARNING] Unexpected status code: $statusCode" -ForegroundColor Yellow
+            return $null
+        }
     }
     catch {
         Write-Host "  [INVOKE-APIPOST V2.2 ERROR] $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "  [INVOKE-APIPOST V2.2 ERROR] Status Code: $($_.Exception.Response.StatusCode.value__)" -ForegroundColor Red
-        Write-Host "  [INVOKE-APIPOST V2.2 ERROR] Status Description: $($_.Exception.Response.StatusDescription)" -ForegroundColor Red
+        if ($_.Exception.Response) {
+            Write-Host "  [INVOKE-APIPOST V2.2 ERROR] Status Code: $($_.Exception.Response.StatusCode.value__)" -ForegroundColor Red
+            Write-Host "  [INVOKE-APIPOST V2.2 ERROR] Status Description: $($_.Exception.Response.StatusDescription)" -ForegroundColor Red
+        }
         return $null
     }
 }
@@ -227,6 +242,8 @@ function Invoke-ApiDelete {
         [object]$Body = $null
     )
 
+    Write-Host "  [INVOKE-APIDELETE V2.2 ENTRY] URL: $Url" -ForegroundColor Cyan
+
     try {
         $headers = @{
             "Authorization" = "Bearer $Token"
@@ -235,15 +252,42 @@ function Invoke-ApiDelete {
             "X-Requested-With" = "XMLHttpRequest"
         }
 
+        # Use Invoke-WebRequest to get status code
         if ($Body) {
             $jsonBody = $Body | ConvertTo-Json -Depth 10
-            return Invoke-RestMethod -Uri $Url -Method Delete -Headers $headers -Body $jsonBody
+            Write-Host "  [INVOKE-APIDELETE V2.2] Request body: $jsonBody" -ForegroundColor DarkGray
+            $webResponse = Invoke-WebRequest -Uri $Url -Method Delete -Headers $headers -Body $jsonBody -UseBasicParsing
         } else {
-            return Invoke-RestMethod -Uri $Url -Method Delete -Headers $headers
+            Write-Host "  [INVOKE-APIDELETE V2.2] No body (empty DELETE)" -ForegroundColor DarkGray
+            $webResponse = Invoke-WebRequest -Uri $Url -Method Delete -Headers $headers -UseBasicParsing
+        }
+
+        # Check status code
+        $statusCode = $webResponse.StatusCode
+        Write-Host "  [INVOKE-APIDELETE V2.2] HTTP Status Code: $statusCode" -ForegroundColor DarkGray
+
+        # 200-299 are success codes
+        if ($statusCode -ge 200 -and $statusCode -lt 300) {
+            if ($webResponse.Content) {
+                $response = $webResponse.Content | ConvertFrom-Json
+                Write-Host "  [INVOKE-APIDELETE V2.2] Response type: $($response.GetType().Name)" -ForegroundColor DarkGray
+                return $response
+            } else {
+                # 204 No Content or other success with no body - return success indicator
+                Write-Host "  [INVOKE-APIDELETE V2.2] Success with no content (HTTP $statusCode)" -ForegroundColor DarkGreen
+                return @{ success = $true; statusCode = $statusCode }
+            }
+        } else {
+            Write-Host "  [INVOKE-APIDELETE V2.2 WARNING] Unexpected status code: $statusCode" -ForegroundColor Yellow
+            return $null
         }
     }
     catch {
-        Write-Host "API DELETE Error ($Url): $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  [INVOKE-APIDELETE V2.2 ERROR] $($_.Exception.Message)" -ForegroundColor Red
+        if ($_.Exception.Response) {
+            Write-Host "  [INVOKE-APIDELETE V2.2 ERROR] Status Code: $($_.Exception.Response.StatusCode.value__)" -ForegroundColor Red
+            Write-Host "  [INVOKE-APIDELETE V2.2 ERROR] Status Description: $($_.Exception.Response.StatusDescription)" -ForegroundColor Red
+        }
         return $null
     }
 }
@@ -444,7 +488,22 @@ function Invoke-ArchiveDocument {
 
     $response = Invoke-ApiPost -Url $url -Token $Token -Body @{}
 
-    Write-Host "  [ARCHIVE-DOCUMENT] Archive response: $(if ($response) { 'Success' } else { 'Failed/Null' })" -ForegroundColor Magenta
+    # Check for success - could be actual response object or success indicator
+    $isSuccess = $false
+    if ($response) {
+        # Check if it's our success indicator (from 204 response)
+        if ($response.success -eq $true) {
+            $isSuccess = $true
+            Write-Host "  [ARCHIVE-DOCUMENT] Archive succeeded (HTTP $($response.statusCode))" -ForegroundColor Green
+        }
+        # Or check if it's actual response data
+        elseif ($response -is [PSCustomObject] -or $response -is [Hashtable]) {
+            $isSuccess = $true
+            Write-Host "  [ARCHIVE-DOCUMENT] Archive succeeded with response" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "  [ARCHIVE-DOCUMENT] Archive failed (null response)" -ForegroundColor Red
+    }
 
     return $response
 }
