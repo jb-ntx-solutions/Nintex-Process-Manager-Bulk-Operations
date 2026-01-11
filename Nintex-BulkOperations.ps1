@@ -301,6 +301,12 @@ function Get-DocumentsFromGroup {
         if ($response -and $response.items) {
             Write-Host "    Page ${page}: Fetched $($response.items.Count) documents" -ForegroundColor Gray
 
+            # Debug: Show first document's properties on first page
+            if ($page -eq 1 -and $response.items.Count -gt 0) {
+                $firstDoc = $response.items[0]
+                Write-Host "    [DEBUG] Sample document properties: documentId=$($firstDoc.documentId), documentName=$($firstDoc.documentName), documentUniqueId=$($firstDoc.documentUniqueId)" -ForegroundColor Yellow
+            }
+
             # If not including subgroups, filter to only documents in the target group
             if ($IncludeSubgroups) {
                 $allDocuments += $response.items
@@ -2272,6 +2278,18 @@ function Invoke-BulkDeleteProcesses {
             $documents = Get-DocumentsFromGroup -SiteURL $SiteURL -Token $Token -GroupUniqueId $GroupUniqueId -IncludeSubgroups $includeSubgroups
             $documentsToDelete = $documents
             Write-Host "  Found $($documentsToDelete.Count) documents" -ForegroundColor Green
+
+            # Debug: Show first document's properties if available
+            if ($documentsToDelete.Count -gt 0) {
+                $firstDoc = $documentsToDelete[0]
+                Write-Host "  [DEBUG] First document type: $($firstDoc.GetType().Name)" -ForegroundColor Yellow
+                Write-Host "  [DEBUG] First document properties: $($firstDoc.PSObject.Properties.Name -join ', ')" -ForegroundColor Yellow
+                if ($firstDoc.documentId) {
+                    Write-Host "  [DEBUG] First document ID: $($firstDoc.documentId), Name: $($firstDoc.documentName)" -ForegroundColor Yellow
+                } else {
+                    Write-Host "  [DEBUG] WARNING: First document has no documentId property!" -ForegroundColor Red
+                }
+            }
         }
     }
 
@@ -2784,6 +2802,20 @@ function Invoke-BulkDeleteProcesses {
 
         # Check each document for attached processes
         foreach ($doc in $documentsToDelete) {
+            # Validate document has required properties
+            if (-not $doc.documentId -or $doc.documentId -eq 0) {
+                Write-Host "  [WARNING] Skipping document with invalid/missing ID" -ForegroundColor Red
+                Write-Host "    [DEBUG] Document object properties: $($doc.PSObject.Properties.Name -join ', ')" -ForegroundColor Yellow
+                Write-Host "    [DEBUG] Document object type: $($doc.GetType().Name)" -ForegroundColor Yellow
+                $documentsSkipped += [PSCustomObject]@{
+                    DocumentId = 0
+                    DocumentName = "Unknown"
+                    DocumentUniqueId = "Unknown"
+                    Reason = "Invalid or missing documentId"
+                }
+                continue
+            }
+
             Write-Host "  Checking document: $($doc.documentName) (ID: $($doc.documentId))" -ForegroundColor White
 
             $hasAttachedProcesses = Test-DocumentHasAttachedProcesses -SiteURL $SiteURL -Token $Token -DocumentId $doc.documentId
