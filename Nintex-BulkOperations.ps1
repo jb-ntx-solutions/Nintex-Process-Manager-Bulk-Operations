@@ -1,5 +1,5 @@
 # Nintex Process Manager Bulk Operations Script
-# Version 2.5 (UX Improvements)
+# Version 2.6 (CSV Export for Dependencies)
 # Supports: Archive, Restore, Update Location, Update Ownership, and Delete operations
 
 #Requires -Version 5.1
@@ -2412,19 +2412,37 @@ function Invoke-BulkDeleteProcesses {
     if ($dependencyMap.Count -eq 0) {
         Write-Host "No dependencies found - processes can be deleted directly" -ForegroundColor Green
     } else {
-        Write-Host "Found $($dependencyMap.Count) unique dependencies:" -ForegroundColor Yellow
-        $archivedCount = ($dependencyMap.Values | Where-Object { $_.IsArchived -eq $true }).Count
-        if ($archivedCount -gt 0) {
-            Write-Host "  ($archivedCount will be temporarily restored for link removal)" -ForegroundColor Cyan
-        }
+        # Export dependencies to CSV file
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        $dependenciesFile = "Dependencies_$timestamp.csv"
 
+        $dependencyExport = @()
         foreach ($depKey in $dependencyMap.Keys) {
             $dep = $dependencyMap[$depKey]
             $refCount = $dep.ReferencedByProcesses.Count
-            $archivedLabel = if ($dep.IsArchived) { " [Archived]" } else { "" }
-            Write-Host "  [$($dep.Type)]$archivedLabel $($dep.Name)" -ForegroundColor White
-            Write-Host "    Referenced by $refCount process(es) being deleted" -ForegroundColor Gray
+
+            # Get list of processes that reference this dependency
+            $referencingProcesses = $dep.ReferencedByProcesses -join "; "
+
+            $dependencyExport += [PSCustomObject]@{
+                Type = $dep.Type
+                Name = $dep.Name
+                UniqueId = $dep.UniqueId
+                IsArchived = $dep.IsArchived
+                ReferencedByCount = $refCount
+                ReferencingProcesses = $referencingProcesses
+            }
         }
+
+        $dependencyExport | Export-Csv -Path $dependenciesFile -NoTypeInformation
+
+        $archivedCount = ($dependencyMap.Values | Where-Object { $_.IsArchived -eq $true }).Count
+
+        Write-Host "Found $($dependencyMap.Count) unique dependencies" -ForegroundColor Yellow
+        if ($archivedCount -gt 0) {
+            Write-Host "  ($archivedCount will be temporarily restored for link removal)" -ForegroundColor Cyan
+        }
+        Write-Host "Dependencies exported to: $dependenciesFile" -ForegroundColor Cyan
 
         $proceed = Read-Host "`nDo you want to proceed with dependency removal? (Y/N)"
         if ($proceed -ne 'Y') {
@@ -3013,7 +3031,7 @@ Clear-Host
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  NINTEX PROCESS MANAGER BULK OPERATIONS" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  Version 2.5 (UX Improvements)" -ForegroundColor Yellow
+Write-Host "  Version 2.6 (CSV Export for Dependencies)" -ForegroundColor Yellow
 Write-Host "  Script loaded: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Yellow
 Write-Host ""
 
