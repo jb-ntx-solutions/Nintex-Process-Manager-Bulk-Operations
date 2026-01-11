@@ -2188,24 +2188,26 @@ function Invoke-BulkDeleteProcesses {
         }
     }
 
-    # Step 2: Check dependencies for each process
-    Write-Host "`n=== PHASE 2: Checking Dependencies for Each Process ===" -ForegroundColor Cyan
+    # Step 2: Check dependencies for each process (active and archived)
+    Write-Host "`n=== PHASE 2: Checking Dependencies ===" -ForegroundColor Cyan
 
     $allDependencies = @()  # Array to store all dependencies
     $dependencyMap = @{}    # Map to track unique dependencies by UniqueId
 
+    # Part 1: Check active process dependencies
+    Write-Host "Checking active process dependencies..." -ForegroundColor Gray
     foreach ($processKey in $processDeleteMap.Keys) {
         $processInfo = $processDeleteMap[$processKey]
         $processUniqueId = $processInfo.UniqueId
         $processNumericId = $processInfo.NumericId
-        Write-Host "Checking dependencies for Process ID $processNumericId (UniqueId: $processUniqueId)..." -ForegroundColor White
+        Write-Host "  Process ID $processNumericId (UniqueId: $processUniqueId)..." -ForegroundColor White
 
         $dependencies = Get-ProcessDependencies -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId
 
         if ($dependencies -and $dependencies.Count -gt 0) {
             foreach ($depType in $dependencies) {
                 $typeName = $depType.Type
-                Write-Host "  Found $($depType.Dependencies.Count) dependencies of type: $typeName" -ForegroundColor Yellow
+                Write-Host "    Found $($depType.Dependencies.Count) dependencies of type: $typeName" -ForegroundColor Yellow
 
                 foreach ($dep in $depType.Dependencies) {
                     $depUniqueId = $dep.UniqueId
@@ -2230,43 +2232,22 @@ function Invoke-BulkDeleteProcesses {
                         $dependencyMap[$depKey].ReferencedByProcesses += $processKey
                     }
 
-                    Write-Host "    - $depName ($depUniqueId)" -ForegroundColor Gray
+                    Write-Host "      - $depName ($depUniqueId)" -ForegroundColor Gray
                 }
             }
         } else {
-            Write-Host "  No dependencies found" -ForegroundColor Green
+            Write-Host "    No active dependencies found" -ForegroundColor Green
         }
     }
 
-    # Display summary of dependencies
-    Write-Host "`n=== Dependency Summary ===" -ForegroundColor Cyan
-    if ($dependencyMap.Count -eq 0) {
-        Write-Host "No dependencies found - processes can be deleted directly" -ForegroundColor Green
-    } else {
-        Write-Host "Found $($dependencyMap.Count) unique dependencies:" -ForegroundColor Yellow
-        foreach ($depKey in $dependencyMap.Keys) {
-            $dep = $dependencyMap[$depKey]
-            $refCount = $dep.ReferencedByProcesses.Count
-            Write-Host "  [$($dep.Type)] $($dep.Name)" -ForegroundColor White
-            Write-Host "    Referenced by $refCount process(es) being deleted" -ForegroundColor Gray
-        }
-
-        $proceed = Read-Host "`nDo you want to proceed with dependency removal? (Y/N)"
-        if ($proceed -ne 'Y') {
-            Write-Host "Operation cancelled by user" -ForegroundColor Yellow
-            return
-        }
-    }
-
-    # Step 2.5: Check for dependencies in archived processes
-    Write-Host "`n=== PHASE 2.5: Checking Archived Process Dependencies ===" -ForegroundColor Cyan
-    Write-Host "NOTE: The CheckProcessDependencies API only returns dependencies from active processes." -ForegroundColor Gray
-    Write-Host "      We need to separately check archived processes for links to processes being deleted." -ForegroundColor Gray
+    # Part 2: Check archived process dependencies
+    Write-Host "`nChecking archived process dependencies..." -ForegroundColor Gray
+    Write-Host "  NOTE: The API only returns active dependencies, so we check archived processes separately." -ForegroundColor DarkGray
 
     $archivedDependencies = Get-ArchivedProcessDependencies -SiteURL $SiteURL -Token $Token -ProcessDeleteMap $processDeleteMap
 
     if ($archivedDependencies.Count -gt 0) {
-        Write-Host "`nFound $($archivedDependencies.Count) archived process(es) with dependencies:" -ForegroundColor Yellow
+        Write-Host "  Found $($archivedDependencies.Count) archived process(es) with dependencies" -ForegroundColor Yellow
 
         # Add archived dependencies to the dependencyMap
         foreach ($archivedDep in $archivedDependencies) {
@@ -2287,19 +2268,36 @@ function Invoke-BulkDeleteProcesses {
                 $dependencyMap[$depKey].ReferencedByProcesses += $archivedDep.ReferencedProcessKey
             }
 
-            Write-Host "  [Archived] $($archivedDep.Name) ($($archivedDep.UniqueId))" -ForegroundColor White
-            Write-Host "    Has link to process being deleted" -ForegroundColor Gray
+            Write-Host "    - [Archived] $($archivedDep.Name) ($($archivedDep.UniqueId))" -ForegroundColor Gray
+        }
+    } else {
+        Write-Host "  No archived process dependencies found" -ForegroundColor Green
+    }
+
+    # Display summary of all dependencies (active and archived)
+    Write-Host "`n=== Dependency Summary ===" -ForegroundColor Cyan
+    if ($dependencyMap.Count -eq 0) {
+        Write-Host "No dependencies found - processes can be deleted directly" -ForegroundColor Green
+    } else {
+        Write-Host "Found $($dependencyMap.Count) unique dependencies:" -ForegroundColor Yellow
+        $archivedCount = ($dependencyMap.Values | Where-Object { $_.IsArchived -eq $true }).Count
+        if ($archivedCount -gt 0) {
+            Write-Host "  ($archivedCount will be temporarily restored for link removal)" -ForegroundColor Cyan
         }
 
-        Write-Host "`nThese archived processes will be restored, have links removed, and then re-archived." -ForegroundColor Cyan
+        foreach ($depKey in $dependencyMap.Keys) {
+            $dep = $dependencyMap[$depKey]
+            $refCount = $dep.ReferencedByProcesses.Count
+            $archivedLabel = if ($dep.IsArchived) { " [Archived]" } else { "" }
+            Write-Host "  [$($dep.Type)]$archivedLabel $($dep.Name)" -ForegroundColor White
+            Write-Host "    Referenced by $refCount process(es) being deleted" -ForegroundColor Gray
+        }
 
-        $proceed = Read-Host "`nDo you want to proceed with archived dependency removal? (Y/N)"
+        $proceed = Read-Host "`nDo you want to proceed with dependency removal? (Y/N)"
         if ($proceed -ne 'Y') {
             Write-Host "Operation cancelled by user" -ForegroundColor Yellow
             return
         }
-    } else {
-        Write-Host "No archived process dependencies found" -ForegroundColor Green
     }
 
     # Step 3: Create temporary group for restoring archived dependencies
@@ -2315,12 +2313,6 @@ function Invoke-BulkDeleteProcesses {
     $tempGroupId = $tempGroup.id
     $tempGroupUniqueId = $tempGroup.uniqueId
     Write-Host "Temporary group created (ID: $tempGroupId, uniqueId: $tempGroupUniqueId)" -ForegroundColor Green
-
-    $confirm = Read-Host "`nProceed to PHASE 4 (check and restore archived dependencies)? (Y/N)"
-    if ($confirm -ne 'Y') {
-        Write-Host "Operation cancelled by user" -ForegroundColor Yellow
-        return
-    }
 
     # Step 4: Check status of each dependency and restore if needed
     Write-Host "`n=== PHASE 4: Checking Dependency Status and Restoring Archived Dependencies ===" -ForegroundColor Cyan
@@ -2374,12 +2366,6 @@ function Invoke-BulkDeleteProcesses {
     }
 
     Write-Host "`nRestored $($restoredDependencies.Count) archived dependencies to temporary group" -ForegroundColor Green
-
-    $confirm = Read-Host "`nProceed to PHASE 5 (remove dependencies)? (Y/N)"
-    if ($confirm -ne 'Y') {
-        Write-Host "Operation cancelled by user" -ForegroundColor Yellow
-        return
-    }
 
     # Step 5: Remove dependencies
     Write-Host "`n=== PHASE 5: Removing Dependencies ===" -ForegroundColor Cyan
@@ -2569,12 +2555,6 @@ function Invoke-BulkDeleteProcesses {
     # Step 6: Archive processes (skipping ownership update as it's not needed with bypass approvals)
     Write-Host "`n=== PHASE 6: Archiving Processes ===" -ForegroundColor Cyan
 
-    $confirm = Read-Host "Ready to archive processes. Continue? (Y/N)"
-    if ($confirm -ne 'Y') {
-        Write-Host "Operation cancelled" -ForegroundColor Yellow
-        return
-    }
-
     foreach ($processKey in $processDeleteMap.Keys) {
         $processInfo = $processDeleteMap[$processKey]
         $processNumericId = $processInfo.NumericId
@@ -2631,12 +2611,6 @@ function Invoke-BulkDeleteProcesses {
 
     Write-Host "`nProcesses deleted. Total: $($results.Count)" -ForegroundColor Cyan
 
-    $confirm = Read-Host "`nProceed to PHASE 8 (re-archive temporarily restored dependencies)? (Y/N)"
-    if ($confirm -ne 'Y') {
-        Write-Host "Operation cancelled by user" -ForegroundColor Yellow
-        return
-    }
-
     # Step 8: Re-archive temporarily restored dependencies
     Write-Host "`n=== PHASE 8: Re-archiving Temporarily Restored Dependencies ===" -ForegroundColor Cyan
 
@@ -2653,12 +2627,6 @@ function Invoke-BulkDeleteProcesses {
     }
 
     Write-Host "`nRe-archived $($restoredDependencies.Count) dependencies" -ForegroundColor Green
-
-    $confirm = Read-Host "`nProceed to PHASE 9 (cleanup and save results)? (Y/N)"
-    if ($confirm -ne 'Y') {
-        Write-Host "Operation cancelled by user" -ForegroundColor Yellow
-        return
-    }
 
     # Step 9: Clean up temp group
     Write-Host "`n=== PHASE 9: Cleanup ===" -ForegroundColor Cyan
