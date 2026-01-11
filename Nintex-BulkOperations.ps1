@@ -2108,7 +2108,7 @@ function Invoke-BulkDeleteProcesses {
     else {  # Group-based
         $includeSubgroups = (Read-Host "Include subgroups? (Y/N)") -eq 'Y'
         $processes = Get-ProcessesFromGroup -SiteURL $SiteURL -Token $Token -GroupID $GroupID -GroupUniqueId $GroupUniqueId -IncludeSubgroups $includeSubgroups
-        $processesToDelete = $processes | ForEach-Object { $_.id }
+        $processesToDelete = $processes | ForEach-Object { $_.processUniqueId }
     }
 
     Write-Host "Identified $($processesToDelete.Count) processes to delete" -ForegroundColor Green
