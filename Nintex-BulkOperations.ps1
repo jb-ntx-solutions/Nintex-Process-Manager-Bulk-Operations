@@ -1,5 +1,5 @@
 # Nintex Process Manager Bulk Operations Script
-# Version 2.4 (Clean Output)
+# Version 2.5 (UX Improvements)
 # Supports: Archive, Restore, Update Location, Update Ownership, and Delete operations
 
 #Requires -Version 5.1
@@ -264,8 +264,6 @@ function Get-ProcessesFromGroup {
         [bool]$IncludeSubgroups = $true
     )
 
-    Write-Host "  Looking for processes in group (Include subgroups: $IncludeSubgroups)" -ForegroundColor Gray
-
     if (-not $GroupUniqueId) {
         Write-Host "  Error: GroupUniqueId is required for efficient group querying" -ForegroundColor Red
         return @()
@@ -276,7 +274,6 @@ function Get-ProcessesFromGroup {
     # Use the breadcrumb/children endpoint for efficient server-side filtering
     # This returns only the direct children of the specified group
     $url = "$SiteURL/bff/navigation/api/v1/breadcrumb/children?type=ProcessGroup&id=$GroupUniqueId"
-    Write-Host "    Fetching children of group..." -ForegroundColor Gray
 
     $response = Invoke-ApiGet -Url $url -Token $Token
 
@@ -285,8 +282,6 @@ function Get-ProcessesFromGroup {
         $processes = $response.breadcrumbItems | Where-Object { $_.type -eq "Process" }
 
         if ($processes) {
-            Write-Host "    Found $($processes.Count) processes in this group" -ForegroundColor Gray
-
             # Map breadcrumb format to expected format
             # The breadcrumb 'id' is the process unique ID
             $allProcesses += $processes | ForEach-Object {
@@ -304,8 +299,6 @@ function Get-ProcessesFromGroup {
             $subgroups = $response.breadcrumbItems | Where-Object { $_.type -eq "ProcessGroup" }
 
             if ($subgroups) {
-                Write-Host "    Found $($subgroups.Count) subgroups, checking recursively..." -ForegroundColor Gray
-
                 foreach ($subgroup in $subgroups) {
                     $subgroupProcesses = Get-ProcessesFromGroup -SiteURL $SiteURL -Token $Token `
                         -GroupID 0 -GroupUniqueId $subgroup.id -IncludeSubgroups $true
@@ -315,7 +308,6 @@ function Get-ProcessesFromGroup {
         }
     }
 
-    Write-Host "  Total processes found: $($allProcesses.Count)" -ForegroundColor Green
     return $allProcesses
 }
 
@@ -599,7 +591,6 @@ function Get-ProcessGroups {
         Write-Host "Fetching group tree from Process Manager..." -ForegroundColor Cyan
 
         # Get root groups by calling GetChildProcessGroupTreeItems without uniqueId parameter
-        Write-Host "  Getting root groups..." -ForegroundColor Gray
         $url = "$SiteURL/Process/View/GetChildProcessGroupTreeItems"
         $response = Invoke-ApiGet -Url $url -Token $Token
 
@@ -613,13 +604,14 @@ function Get-ProcessGroups {
             $_.itemType -eq "group" -or $_.itemType -eq "documentgroup"
         }
 
-        Write-Host "  Found $($rootGroups.Count) root groups" -ForegroundColor Green
-
         # Now recursively fetch the full tree for each root group
         $allGroups = @{}
+        $currentIndex = 0
+        $totalRootGroups = $rootGroups.Count
 
         foreach ($rootGroup in $rootGroups) {
-            Write-Host "  Fetching tree for: $($rootGroup.title)..." -ForegroundColor Gray
+            $currentIndex++
+            Write-Host "`r  Fetching group tree $currentIndex out of $totalRootGroups..." -NoNewline -ForegroundColor Gray
 
             # Add root group
             $allGroups[$rootGroup.id] = @{
@@ -639,6 +631,7 @@ function Get-ProcessGroups {
                     -AllGroups ([ref]$allGroups)
             }
         }
+        Write-Host ""  # New line after progress counter
 
         Write-Host "Successfully fetched $($allGroups.Count) groups total" -ForegroundColor Green
         return $allGroups.Values | Sort-Object -Property itemOrder
@@ -3020,7 +3013,7 @@ Clear-Host
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  NINTEX PROCESS MANAGER BULK OPERATIONS" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  Version 2.4 (Clean Output)" -ForegroundColor Yellow
+Write-Host "  Version 2.5 (UX Improvements)" -ForegroundColor Yellow
 Write-Host "  Script loaded: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Yellow
 Write-Host ""
 
