@@ -3004,7 +3004,7 @@ function Show-MainMenu {
     Write-Host "  [2] Bulk Restore" -ForegroundColor White
     Write-Host "  [3] Bulk Update Location" -ForegroundColor White
     Write-Host "  [4] Bulk Update Ownership" -ForegroundColor White
-    Write-Host "  [5] Bulk Delete Processes" -ForegroundColor White
+    Write-Host "  [5] Bulk Delete Content" -ForegroundColor White
     Write-Host "  [Q] Quit" -ForegroundColor White
     Write-Host ""
 }
@@ -3157,7 +3157,7 @@ while ($running) {
             Invoke-BulkUpdateOwnership -SiteURL $config.SiteURL -Token $token -CsvPath $csvPath
         }
 
-        '5' {  # Bulk Delete Processes
+        '5' {  # Bulk Delete Content
             $sourceType = Get-SourceType -Mode 5
 
             $tempGroupName = $config.TempGroupName
