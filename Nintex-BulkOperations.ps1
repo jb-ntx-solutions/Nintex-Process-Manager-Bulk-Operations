@@ -1425,10 +1425,12 @@ function Get-ArchivedProcessDependencies {
                 $batchSize = 15
                 for ($i = 0; $i -lt $uniqueIds.Count; $i += $batchSize) {
                     $batch = $uniqueIds[$i..[Math]::Min($i + $batchSize - 1, $uniqueIds.Count - 1)]
-                    $batchUniqueIds = $batch -join ','
+
+                    # Build URL with multiple processUniqueIds query parameters
+                    $queryParams = $batch | ForEach-Object { "processUniqueIds=$_" }
+                    $batchUrl = "$SiteURL/mobile/api/v1/processes?" + ($queryParams -join '&')
 
                     try {
-                        $batchUrl = "$SiteURL/mobile/api/v1/processes?processUniqueIds=$batchUniqueIds"
                         $batchResponse = Invoke-ApiGet -Url $batchUrl -Token $Token
 
                         if ($batchResponse -and $batchResponse.data -and $batchResponse.data.Count -gt 0) {
