@@ -1877,14 +1877,11 @@ function Update-ProcessAndPublish {
     )
 
     try {
-        Write-Host "  Fetching current process data..." -ForegroundColor Gray
-
         # Step 1: Get current process data
         $getUrl = "$SiteURL/Api/v1/Processes/$ProcessUniqueId"
         $processData = Invoke-ApiGet -Url $getUrl -Token $Token
 
         if (-not $processData -or -not $processData.processJson) {
-            Write-Host "  Failed to retrieve process data" -ForegroundColor Red
             return $false
         }
 
@@ -1893,43 +1890,24 @@ function Update-ProcessAndPublish {
         $majorVersion = [int]($processData.processJson.Version.Split('.')[0])
         $wasPreviouslyPublished = $majorVersion -gt 0
 
-        Write-Host "  Current version: $($processData.processJson.Version), ProcessRevisionEditId: $processRevisionEditId" -ForegroundColor Gray
-
         # Step 2: Remove links/references from JSON based on dependency type
         if ($DependencyType -eq "Process Input" -or $DependencyType -eq "Process Output") {
-            Write-Host "  Removing $DependencyType references to process $TargetProcessUniqueId..." -ForegroundColor Gray
             $result = Remove-InputOutputReferencesFromJson -ProcessJson $processJson -TargetProcessUniqueId $TargetProcessUniqueId
 
             if ($result.ReferencesRemoved -eq 0) {
-                Write-Host "  No $DependencyType references found to remove" -ForegroundColor Yellow
                 return $true
             }
-
-            Write-Host "  Removed $($result.ReferencesRemoved) $DependencyType reference(s)" -ForegroundColor Green
         }
         else {
             # Default: Linked Process removal
-            Write-Host "  Removing links to process $TargetProcessUniqueId..." -ForegroundColor Gray
             $result = Remove-ProcessLinksFromJson -ProcessJson $processJson -TargetProcessUniqueId $TargetProcessUniqueId
 
             if ($result.LinksRemoved -eq 0) {
-                Write-Host "  No links found to remove" -ForegroundColor Yellow
                 return $true
             }
-
-            Write-Host "  Removed $($result.LinksRemoved) link(s)" -ForegroundColor Green
-        }
-
-        # Verify ProcessRevisionEditId is preserved in cleaned JSON
-        $cleanedObj = $result.CleanedJson | ConvertFrom-Json
-        if ($cleanedObj.ProcessRevisionEditId -ne $processRevisionEditId) {
-            Write-Host "  WARNING: ProcessRevisionEditId mismatch! Original: $processRevisionEditId, Cleaned: $($cleanedObj.ProcessRevisionEditId)" -ForegroundColor Yellow
-        } else {
-            Write-Host "  ProcessRevisionEditId verified: $processRevisionEditId" -ForegroundColor Gray
         }
 
         # Step 3: Update process with cleaned JSON
-        Write-Host "  Updating process..." -ForegroundColor Gray
 
         $updateBody = @{
             ProcessJson = $result.CleanedJson
@@ -1949,21 +1927,11 @@ function Update-ProcessAndPublish {
         $updateResult = Invoke-ApiPut -Url $updateUrl -Token $Token -Body $updateBody
 
         if (-not $updateResult -or -not $updateResult.Success) {
-            Write-Host "  Failed to update process" -ForegroundColor Red
-            if ($updateResult.Error) {
-                Write-Host "    Error: $($updateResult.Error)" -ForegroundColor Red
-            }
-            if ($updateResult.StatusCode) {
-                Write-Host "    HTTP Status: $($updateResult.StatusCode)" -ForegroundColor Red
-            }
             return $false
         }
 
-        Write-Host "  Process updated successfully (HTTP $($updateResult.StatusCode))" -ForegroundColor Green
-
         # Step 4: Publish if needed
         if ($wasPreviouslyPublished) {
-            Write-Host "  Process requires publishing..." -ForegroundColor Gray
 
             # Get updated process data to get new ProcessRevisionEditId
             Start-Sleep -Seconds 1
@@ -1971,8 +1939,6 @@ function Update-ProcessAndPublish {
             $newProcessRevisionEditId = $updatedProcessData.processJson.ProcessRevisionEditId
 
             if ($ApprovalsEnabled) {
-                Write-Host "  Approvals enabled - submitting for approval and bypassing..." -ForegroundColor Gray
-
                 # Get the updated process JSON with new ProcessRevisionEditId
                 $updatedProcessJson = $updatedProcessData.processJson | ConvertTo-Json -Depth 20 -Compress
 
@@ -1994,14 +1960,8 @@ function Update-ProcessAndPublish {
                 $submitResult = Invoke-ApiPut -Url $updateUrl -Token $Token -Body $submitBody
 
                 if (-not $submitResult -or -not $submitResult.Success) {
-                    Write-Host "  Failed to submit for approval" -ForegroundColor Red
-                    if ($submitResult.Error) {
-                        Write-Host "    Error: $($submitResult.Error)" -ForegroundColor Red
-                    }
                     return $false
                 }
-
-                Write-Host "  Submitted for approval successfully" -ForegroundColor Green
 
                 # Wait and get the latest ProcessRevisionEditId after submit
                 Start-Sleep -Seconds 2
@@ -2018,16 +1978,12 @@ function Update-ProcessAndPublish {
                 $publishResult = Invoke-ApiPost -Url $publishUrl -Token $Token -Body $publishBody
 
                 if ($publishResult) {
-                    Write-Host "  Process published successfully (approval bypassed)" -ForegroundColor Green
                     return $true
                 } else {
-                    Write-Host "  Failed to publish process" -ForegroundColor Red
                     return $false
                 }
             }
             else {
-                Write-Host "  Approvals not enabled - publishing directly..." -ForegroundColor Gray
-
                 # Publish without approval
                 $publishUrl = "$SiteURL/Process/Edit/PublishProcessRevisionEdit"
                 $publishBody = @{
@@ -2039,21 +1995,17 @@ function Update-ProcessAndPublish {
                 $publishResult = Invoke-ApiPost -Url $publishUrl -Token $Token -Body $publishBody
 
                 if ($publishResult) {
-                    Write-Host "  Process published successfully" -ForegroundColor Green
                     return $true
                 } else {
-                    Write-Host "  Failed to publish process" -ForegroundColor Red
                     return $false
                 }
             }
         }
         else {
-            Write-Host "  Process has not been previously published - no publish needed" -ForegroundColor Green
             return $true
         }
     }
     catch {
-        Write-Host "  Error updating process: $($_.Exception.Message)" -ForegroundColor Red
         return $false
     }
 }
@@ -2311,13 +2263,18 @@ function Invoke-BulkDeleteProcesses {
         Write-Host "`n=== Getting Process Details ===" -ForegroundColor Cyan
 
     $processDeleteMap = @{}  # Maps any ID to object with {NumericId, UniqueId, GroupUniqueId}
+    $currentIndex = 0
+    $totalProcesses = $processesToDelete.Count
+
     foreach ($processId in $processesToDelete) {
+        $currentIndex++
+        Write-Host "`r  Getting Process Details $currentIndex out of $totalProcesses..." -NoNewline -ForegroundColor Gray
+
         # Check if the ID is already a GUID (UniqueId) or a numeric ID
         $guidRegex = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 
         if ($processId -match $guidRegex) {
             # It's already a UniqueId (GUID format), need to fetch numeric ID and group info
-            Write-Host "  Process UniqueId: $processId (fetching numeric ID and group)" -ForegroundColor Gray
             $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processId
             if ($processStatus) {
                 $numericId = $processStatus.Id
@@ -2331,9 +2288,8 @@ function Invoke-BulkDeleteProcesses {
                     UniqueId = $processId
                     GroupUniqueId = $groupUniqueId
                 }
-                Write-Host "    -> Numeric ID: $numericId, GroupUniqueId: $groupUniqueId" -ForegroundColor Gray
             } else {
-                Write-Host "  Warning: Could not retrieve process details for UniqueId $processId" -ForegroundColor Yellow
+                Write-Host "`n  Warning: Could not retrieve process details for UniqueId $processId" -ForegroundColor Yellow
             }
         } else {
             # It's a numeric ID, fetch the process to get the UniqueId and group info
@@ -2358,6 +2314,7 @@ function Invoke-BulkDeleteProcesses {
             }
         }
     }
+    Write-Host ""  # New line after progress counter
 
     # Step 2: Check dependencies for each process (active and archived)
     Write-Host "`n=== PHASE 2: Checking Dependencies ===" -ForegroundColor Cyan
@@ -2367,18 +2324,23 @@ function Invoke-BulkDeleteProcesses {
 
     # Part 1: Check active process dependencies
     Write-Host "Checking active process dependencies..." -ForegroundColor Gray
+    $currentIndex = 0
+    $totalProcesses = $processDeleteMap.Keys.Count
+    $groupDependencies = @()  # Track group dependencies for separate file
+
     foreach ($processKey in $processDeleteMap.Keys) {
+        $currentIndex++
+        Write-Host "`r  Getting Process Dependencies $currentIndex out of $totalProcesses..." -NoNewline -ForegroundColor Gray
+
         $processInfo = $processDeleteMap[$processKey]
         $processUniqueId = $processInfo.UniqueId
         $processNumericId = $processInfo.NumericId
-        Write-Host "  Process ID $processNumericId (UniqueId: $processUniqueId)..." -ForegroundColor White
 
         $dependencies = Get-ProcessDependencies -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId
 
         if ($dependencies -and $dependencies.Count -gt 0) {
             foreach ($depType in $dependencies) {
                 $typeName = $depType.Type
-                Write-Host "    Found $($depType.Dependencies.Count) dependencies of type: $typeName" -ForegroundColor Yellow
 
                 foreach ($dep in $depType.Dependencies) {
                     $depUniqueId = $dep.UniqueId
@@ -2398,18 +2360,25 @@ function Invoke-BulkDeleteProcesses {
                     }
 
                     # Add the current process to the list of processes that reference this dependency
-                    # Use $processKey (the original ID) as the key for consistency with processDeleteMap
                     if ($dependencyMap[$depKey].ReferencedByProcesses -notcontains $processKey) {
                         $dependencyMap[$depKey].ReferencedByProcesses += $processKey
                     }
 
-                    Write-Host "      - $depName ($depUniqueId)" -ForegroundColor Gray
+                    # Track group dependencies for export to file
+                    if ($typeName -eq "Linked Process Group") {
+                        $groupDependencies += [PSCustomObject]@{
+                            ProcessID = $processNumericId
+                            ProcessUniqueId = $processUniqueId
+                            ProcessName = $processInfo.Name
+                            GroupName = $depName
+                            GroupUniqueId = $depUniqueId
+                        }
+                    }
                 }
             }
-        } else {
-            Write-Host "    No active dependencies found" -ForegroundColor Green
         }
     }
+    Write-Host ""  # New line after progress counter
 
     # Part 2: Check archived process dependencies
     Write-Host "`nChecking archived process dependencies..." -ForegroundColor Gray
@@ -2563,28 +2532,23 @@ function Invoke-BulkDeleteProcesses {
         # Handle automatic removal of dependencies (Linked Process, Process Input, Process Output)
         if ($automaticDeps.Count -gt 0) {
             Write-Host "`n--- Removing Dependencies (Automatic) ---" -ForegroundColor Cyan
-            Write-Host "Processing $($automaticDeps.Count) dependencies (Linked Process, Process Input, Process Output)..." -ForegroundColor White
 
             $dependenciesProcessed = 0
             $dependenciesSuccessful = 0
             $dependenciesFailed = 0
+            $totalDependencies = $automaticDeps.Count
 
             foreach ($dep in $automaticDeps) {
                 $dependenciesProcessed++
+                Write-Host "`r  Removing Dependencies $dependenciesProcessed out of $totalDependencies..." -NoNewline -ForegroundColor Gray
 
                 # Get all processes being deleted that reference this dependency
                 $processesToRemoveFrom = $dep.ReferencedByProcesses
-
-                Write-Host "`n[$dependenciesProcessed/$($automaticDeps.Count)] Processing $($dep.Type) dependency: $($dep.Name)" -ForegroundColor White
-                Write-Host "  Removing references from $($processesToRemoveFrom.Count) process(es) being deleted" -ForegroundColor Gray
 
                 # For each process being deleted that references this dependency
                 foreach ($processIdToDelete in $processesToRemoveFrom) {
                     $processInfo = $processDeleteMap[$processIdToDelete]
                     $processUniqueIdToDelete = $processInfo.UniqueId
-
-                    Write-Host "  Removing $($dep.Type) from dependent process: $($dep.Name) ($($dep.UniqueId))" -ForegroundColor White
-                    Write-Host "    Target process to remove: $processUniqueIdToDelete" -ForegroundColor Gray
 
                     $success = Update-ProcessAndPublish -SiteURL $SiteURL -Token $Token `
                         -ProcessUniqueId $dep.UniqueId `
@@ -2602,6 +2566,7 @@ function Invoke-BulkDeleteProcesses {
                     Start-Sleep -Milliseconds 500
                 }
             }
+            Write-Host ""  # New line after progress counter
 
             Write-Host "`n=== Automatic Dependency Removal Summary ===" -ForegroundColor Cyan
             Write-Host "Total dependencies processed: $dependenciesProcessed" -ForegroundColor White
@@ -2619,36 +2584,63 @@ function Invoke-BulkDeleteProcesses {
 
         # Handle manual removal dependencies (includes Linked Process Group and other types)
         if ($manualDeps.Count -gt 0) {
-            Write-Host "`n--- Manual Dependency Removal Required ---" -ForegroundColor Yellow
-            Write-Host "The following dependencies require MANUAL removal:" -ForegroundColor Yellow
-            Write-Host ""
+            # Separate group dependencies from other manual dependencies
+            $groupDeps = $manualDeps | Where-Object { $_.Type -eq "Linked Process Group" }
+            $otherManualDeps = $manualDeps | Where-Object { $_.Type -ne "Linked Process Group" }
 
-            # Group manual dependencies by the processes being deleted
-            $manualDepsByProcess = @{}
-            foreach ($dep in $manualDeps) {
-                foreach ($processIdToDelete in $dep.ReferencedByProcesses) {
-                    if (-not $manualDepsByProcess.ContainsKey($processIdToDelete)) {
-                        $manualDepsByProcess[$processIdToDelete] = @()
-                    }
-                    $manualDepsByProcess[$processIdToDelete] += $dep
+            # Export group dependencies to file if any exist
+            if ($groupDeps.Count -gt 0) {
+                $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+                $groupDepsFile = "Group_Dependencies_$timestamp.csv"
+
+                $groupDepExport = @()
+                foreach ($groupDep in $groupDependencies) {
+                    $groupDepExport += $groupDep
+                }
+
+                if ($groupDepExport.Count -gt 0) {
+                    $groupDepExport | Export-Csv -Path $groupDepsFile -NoTypeInformation
+                    Write-Host "`nGroup dependencies exported to: $groupDepsFile" -ForegroundColor Cyan
+                    Write-Host "  Found $($groupDepExport.Count) group dependencies that must be manually removed" -ForegroundColor Yellow
                 }
             }
 
-            # Display dependencies grouped by process
-            foreach ($processIdToDelete in $manualDepsByProcess.Keys) {
-                $processInfo = $processDeleteMap[$processIdToDelete]
-                $processUniqueIdToDelete = $processInfo.UniqueId
-                $deps = $manualDepsByProcess[$processIdToDelete]
+            # Only display non-group manual dependencies in console
+            if ($otherManualDeps.Count -gt 0) {
+                Write-Host "`n--- Manual Dependency Removal Required ---" -ForegroundColor Yellow
+                Write-Host "The following dependencies require MANUAL removal:" -ForegroundColor Yellow
+                Write-Host ""
 
-                Write-Host "Process to be deleted: ID $processIdToDelete (UniqueId: $processUniqueIdToDelete)" -ForegroundColor White
-                Write-Host "  Has the following dependencies that must be manually removed:" -ForegroundColor Yellow
-
-                foreach ($dep in $deps) {
-                    Write-Host "    - Type: $($dep.Type)" -ForegroundColor Cyan
-                    Write-Host "      Name: $($dep.Name)" -ForegroundColor Cyan
-                    Write-Host "      UniqueId: $($dep.UniqueId)" -ForegroundColor Cyan
-                    Write-Host ""
+                # Group manual dependencies by the processes being deleted
+                $manualDepsByProcess = @{}
+                foreach ($dep in $otherManualDeps) {
+                    foreach ($processIdToDelete in $dep.ReferencedByProcesses) {
+                        if (-not $manualDepsByProcess.ContainsKey($processIdToDelete)) {
+                            $manualDepsByProcess[$processIdToDelete] = @()
+                        }
+                        $manualDepsByProcess[$processIdToDelete] += $dep
+                    }
                 }
+
+                # Display dependencies grouped by process
+                foreach ($processIdToDelete in $manualDepsByProcess.Keys) {
+                    $processInfo = $processDeleteMap[$processIdToDelete]
+                    $processUniqueIdToDelete = $processInfo.UniqueId
+                    $deps = $manualDepsByProcess[$processIdToDelete]
+
+                    Write-Host "Process to be deleted: ID $processIdToDelete (UniqueId: $processUniqueIdToDelete)" -ForegroundColor White
+                    Write-Host "  Has the following dependencies that must be manually removed:" -ForegroundColor Yellow
+
+                    foreach ($dep in $deps) {
+                        Write-Host "    - Type: $($dep.Type)" -ForegroundColor Cyan
+                        Write-Host "      Name: $($dep.Name)" -ForegroundColor Cyan
+                        Write-Host "      UniqueId: $($dep.UniqueId)" -ForegroundColor Cyan
+                        Write-Host ""
+                    }
+                }
+            } else {
+                # Only group dependencies - update the manual deps list to empty so we don't prompt
+                $manualDepsByProcess = @{}
             }
 
             Write-Host "========================================" -ForegroundColor Yellow
