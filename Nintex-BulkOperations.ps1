@@ -2239,8 +2239,10 @@ function Invoke-BulkDeleteProcesses {
     foreach ($depKey in $dependencyMap.Keys) {
         $dep = $dependencyMap[$depKey]
 
-        # Only process "Linked Process" dependencies for now
-        if ($dep.Type -eq "Linked Process") {
+        # Only process archived dependencies from PHASE 2.5 (incoming references)
+        # Skip outgoing dependencies from PHASE 2 (things the target process references)
+        # We only need to restore processes that REFERENCE the targets being deleted, not processes REFERENCED BY the targets
+        if ($dep.IsArchived -eq $true) {
             Write-Host "Checking status of dependency: $($dep.Name) ($($dep.UniqueId))" -ForegroundColor White
 
             $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $dep.UniqueId
@@ -2277,10 +2279,6 @@ function Invoke-BulkDeleteProcesses {
             } else {
                 Write-Host "  Could not retrieve process status" -ForegroundColor Red
             }
-        } elseif ($dep.Type -eq "Linked Process Group") {
-            Write-Host "Dependency is a Process Group: $($dep.Name) - Will require manual removal" -ForegroundColor Cyan
-        } else {
-            Write-Host "Dependency type '$($dep.Type)' - Will require manual removal" -ForegroundColor Cyan
         }
     }
 
