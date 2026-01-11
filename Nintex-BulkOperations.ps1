@@ -110,6 +110,7 @@ function Invoke-ApiPost {
             "Authorization" = "Bearer $Token"
             "Content-Type" = "application/json"
             "Accept" = "application/json"
+            "X-Requested-With" = "XMLHttpRequest"
         }
 
         if ($Body) {
@@ -137,14 +138,44 @@ function Invoke-ApiPut {
             "Authorization" = "Bearer $Token"
             "Content-Type" = "application/json"
             "Accept" = "application/json"
+            "X-Requested-With" = "XMLHttpRequest"
         }
 
         $jsonBody = $Body | ConvertTo-Json -Depth 10
-        return Invoke-RestMethod -Uri $Url -Method Put -Headers $headers -Body $jsonBody
+
+        # Invoke-RestMethod throws on HTTP errors, so if this succeeds, we got a 2xx response
+        # No -StatusCodeVariable needed (not available in PowerShell 5.1)
+        $response = Invoke-RestMethod -Uri $Url -Method Put -Headers $headers -Body $jsonBody -ErrorAction Stop
+
+        # Success - assume 200 since no exception was thrown
+        return @{ Success = $true; StatusCode = 200; Response = $response }
     }
     catch {
-        Write-Host "API PUT Error ($Url): $($_.Exception.Message)" -ForegroundColor Red
-        return $null
+        $errorDetails = $_.Exception.Message
+        $statusCode = "Unknown"
+
+        # Try to extract status code from exception
+        if ($_.Exception.Response) {
+            $statusCode = [int]$_.Exception.Response.StatusCode
+
+            # Try to read response body for more details
+            try {
+                $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+                $responseBody = $reader.ReadToEnd()
+                $reader.Close()
+                if ($responseBody) {
+                    Write-Host "  Response body: $responseBody" -ForegroundColor Gray
+                }
+            }
+            catch {
+                # Couldn't read response body
+            }
+        }
+
+        Write-Host "API PUT Error ($Url): HTTP $statusCode - $errorDetails" -ForegroundColor Red
+
+        # Return error info instead of null so caller can check status
+        return @{ Success = $false; StatusCode = $statusCode; Error = $errorDetails }
     }
 }
 
@@ -781,12 +812,7 @@ function Invoke-BulkArchive {
         if ($ObjectType -eq "Processes" -or $ObjectType -eq "Both") {
             $includeSubgroups = (Read-Host "Include subgroups? (Y/N)") -eq 'Y'
             $processes = Get-ProcessesFromGroup -SiteURL $SiteURL -Token $Token -GroupID $GroupID -GroupUniqueId $GroupUniqueId -IncludeSubgroups $includeSubgroups
-            $processesToArchive = $processes | ForEach-Object {
-                @{
-                    Id = $_.id
-                    UniqueId = $_.uniqueId
-                }
-            }
+            $processesToArchive = $processes | ForEach-Object { $_.id }
             Write-Host "Found $($processesToArchive.Count) processes to archive" -ForegroundColor Green
         }
 
@@ -802,66 +828,58 @@ function Invoke-BulkArchive {
     if ($processesToArchive.Count -gt 0) {
         Write-Host "`nArchiving $($processesToArchive.Count) processes..." -ForegroundColor Cyan
 
-        foreach ($processItem in $processesToArchive) {
-            # Handle both object format (from group) and simple ID format (from CSV)
-            if ($processItem -is [hashtable]) {
-                $processId = $processItem.Id
-                $processUniqueId = $processItem.UniqueId
-            } else {
-                $processId = $processItem
-                # For CSV input, we need to fetch the process to get its UniqueId
-                $verifyUrl = "$SiteURL/Api/v1/Processes/$processId"
-                $process = Invoke-ApiGet -Url $verifyUrl -Token $Token
-                if ($process) {
-                    $processUniqueId = $process.uniqueId
-                } else {
-                    Write-Host "  Failed: Could not retrieve process details" -ForegroundColor Red
-                    $results += [PSCustomObject]@{
-                        ObjectType = "Process"
-                        ObjectID = $processId
-                        Operation = "Archive"
-                        Status = "Failed"
-                        Message = "Could not retrieve process"
-                    }
-                    continue
-                }
-            }
-
+        foreach ($processId in $processesToArchive) {
             Write-Host "Archiving Process ID: $processId" -ForegroundColor White
 
-            $result = Archive-Process -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId -Comment "Bulk archive operation"
+            # Fetch process details to get uniqueId
+            $verifyUrl = "$SiteURL/Api/v1/Processes/$processId"
+            $process = Invoke-ApiGet -Url $verifyUrl -Token $Token
 
-            if ($result) {
-                # Verify archive
-                $verifyUrl = "$SiteURL/Api/v1/Processes/$processUniqueId"
-                $process = Invoke-ApiGet -Url $verifyUrl -Token $Token
+            if ($process -and $process.uniqueId) {
+                $processUniqueId = $process.uniqueId
 
-                if ($process -and $process.isArchived) {
-                    Write-Host "  Success: Process archived" -ForegroundColor Green
-                    $results += [PSCustomObject]@{
-                        ObjectType = "Process"
-                        ObjectID = $processId
-                        Operation = "Archive"
-                        Status = "Success"
-                        Message = "Archived successfully"
+                # Use Archive-Process helper
+                $result = Archive-Process -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId -Comment "Bulk archive operation"
+
+                if ($result) {
+                    # Verify archive
+                    $process = Invoke-ApiGet -Url $verifyUrl -Token $Token
+                    if ($process -and $process.isArchived) {
+                        Write-Host "  Success: Process archived" -ForegroundColor Green
+                        $results += [PSCustomObject]@{
+                            ObjectType = "Process"
+                            ObjectID = $processId
+                            Operation = "Archive"
+                            Status = "Success"
+                            Message = "Archived successfully"
+                        }
+                    } else {
+                        Write-Host "  Failed: Could not archive process" -ForegroundColor Red
+                        $results += [PSCustomObject]@{
+                            ObjectType = "Process"
+                            ObjectID = $processId
+                            Operation = "Archive"
+                            Status = "Failed"
+                            Message = "Could not archive"
+                        }
                     }
                 } else {
-                    Write-Host "  Failed: Could not archive process" -ForegroundColor Red
                     $results += [PSCustomObject]@{
                         ObjectType = "Process"
                         ObjectID = $processId
                         Operation = "Archive"
                         Status = "Failed"
-                        Message = "Could not archive"
+                        Message = "Archive API call failed"
                     }
                 }
             } else {
+                Write-Host "  Failed: Could not retrieve process details" -ForegroundColor Red
                 $results += [PSCustomObject]@{
                     ObjectType = "Process"
                     ObjectID = $processId
                     Operation = "Archive"
                     Status = "Failed"
-                    Message = "Archive API call failed"
+                    Message = "Could not retrieve process"
                 }
             }
         }
@@ -952,7 +970,7 @@ function Invoke-BulkRestore {
     else {  # Restore all archived items
         if ($ObjectType -eq "Processes" -or $ObjectType -eq "Both") {
             $processes = Get-ArchivedProcesses -SiteURL $SiteURL -Token $Token
-            $processesToRestore = $processes | ForEach-Object { $_.id }
+            $processesToRestore = $processes | ForEach-Object { $_.processUniqueId }
             Write-Host "Found $($processesToRestore.Count) archived processes" -ForegroundColor Green
         }
 
@@ -968,8 +986,12 @@ function Invoke-BulkRestore {
         foreach ($processId in $processesToRestore) {
             Write-Host "Restoring Process ID: $processId" -ForegroundColor White
 
-            $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess?id=$processId&processGroupId=$RestoreGroupID"
-            $result = Invoke-ApiPost -Url $restoreUrl -Token $Token
+            $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess"
+            $restoreBody = @{
+                processUniqueId = $processId
+                processGroupId = $RestoreGroupID.ToString()
+            }
+            $result = Invoke-ApiPost -Url $restoreUrl -Token $Token -Body $restoreBody
 
             if ($result) {
                 # Verify restore
@@ -1082,7 +1104,7 @@ function Invoke-BulkUpdateLocation {
                 $updateUrl = "$SiteURL/Api/v1/Processes/$objectId"
                 $updateResult = Invoke-ApiPut -Url $updateUrl -Token $Token -Body $process
 
-                if ($updateResult) {
+                if ($updateResult -and $updateResult.Success) {
                     Write-Host "  Success: Process moved" -ForegroundColor Green
                     $results += [PSCustomObject]@{
                         ObjectType = "Process"
@@ -1197,7 +1219,7 @@ function Invoke-BulkUpdateOwnership {
                 $updateUrl = "$SiteURL/Api/v1/Processes/$processId"
                 $updateResult = Invoke-ApiPut -Url $updateUrl -Token $Token -Body $process
 
-                if ($updateResult) {
+                if ($updateResult -and $updateResult.Success) {
                     Write-Host "  Success: Ownership updated" -ForegroundColor Green
                     $results += [PSCustomObject]@{
                         ObjectType = "Process"
@@ -1412,6 +1434,138 @@ function Delete-Process {
     }
 }
 
+function Find-ProcessLinksInJson {
+    param(
+        [string]$ProcessJson,
+        [string]$TargetProcessUniqueId
+    )
+
+    # Convert JSON string to object
+    $processObj = $ProcessJson | ConvertFrom-Json
+
+    # Check ProcessProcedures.ProcessLink
+    if ($processObj.ProcessProcedures.ProcessLink) {
+        $found = @($processObj.ProcessProcedures.ProcessLink | Where-Object {
+            $_.LinkedProcessUniqueId -eq $TargetProcessUniqueId
+        })
+        if ($found.Count -gt 0) {
+            return $true
+        }
+    }
+
+    # Check ChildProcessProcedures in Activities
+    if ($processObj.ProcessProcedures.Activity) {
+        foreach ($activity in $processObj.ProcessProcedures.Activity) {
+            if ($activity.ChildProcessProcedures) {
+                # Check each child type (Note, Task, Information, etc.)
+                $childTypes = @('Note', 'Task', 'Information', 'Form', 'Guide', 'Image', 'Policy', 'Training', 'Video', 'WebLink')
+
+                foreach ($childType in $childTypes) {
+                    if ($activity.ChildProcessProcedures.$childType) {
+                        foreach ($child in $activity.ChildProcessProcedures.$childType) {
+                            if ($child.LinkedProcessUniqueId -eq $TargetProcessUniqueId) {
+                                return $true
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return $false
+}
+
+function Get-ArchivedProcessDependencies {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [hashtable]$ProcessDeleteMap
+    )
+
+    Write-Host "  Fetching list of archived processes..." -ForegroundColor Gray
+
+    $archivedDependencies = @()
+    $page = 1
+    $pageSize = 20
+    $hasMore = $true
+
+    # Step 1: Fetch all archived processes with pagination
+    while ($hasMore) {
+        try {
+            $listUrl = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$pageSize&ListType=7"
+            $response = Invoke-ApiGet -Url $listUrl -Token $Token
+
+            if ($response -and $response.items -and $response.items.Count -gt 0) {
+                Write-Host "  Page $page : Found $($response.items.Count) archived processes" -ForegroundColor Gray
+
+                # Collect UniqueIds for batch fetching
+                $uniqueIds = $response.items | ForEach-Object { $_.processUniqueId }
+
+                # Step 2: Batch fetch archived process details (10-20 per batch for efficiency)
+                $batchSize = 15
+                for ($i = 0; $i -lt $uniqueIds.Count; $i += $batchSize) {
+                    $batch = $uniqueIds[$i..[Math]::Min($i + $batchSize - 1, $uniqueIds.Count - 1)]
+
+                    # Build URL with multiple processUniqueIds query parameters
+                    $queryParams = $batch | ForEach-Object { "processUniqueIds=$_" }
+                    $batchUrl = "$SiteURL/mobile/api/v1/processes?" + ($queryParams -join '&')
+
+                    try {
+                        $batchResponse = Invoke-ApiGet -Url $batchUrl -Token $Token
+
+                        if ($batchResponse -and $batchResponse.data -and $batchResponse.data.Count -gt 0) {
+                            # Step 3: Search each archived process for links to processes being deleted
+                            foreach ($archivedProcess in $batchResponse.data) {
+                                $archivedUniqueId = $archivedProcess.ProcessModel.UniqueId
+                                $archivedName = $archivedProcess.ProcessModel.Name
+                                $archivedProcessJson = $archivedProcess.ProcessModel | ConvertTo-Json -Depth 20 -Compress
+
+                                # Check if this archived process has links to any process being deleted
+                                foreach ($processKey in $ProcessDeleteMap.Keys) {
+                                    $processInfo = $ProcessDeleteMap[$processKey]
+                                    $targetUniqueId = $processInfo.UniqueId
+
+                                    if (Find-ProcessLinksInJson -ProcessJson $archivedProcessJson -TargetProcessUniqueId $targetUniqueId) {
+                                        Write-Host "    Found: $archivedName has link to process $targetUniqueId" -ForegroundColor Yellow
+
+                                        # Add to dependencies list
+                                        $archivedDependencies += @{
+                                            Type = "Linked Process"
+                                            UniqueId = $archivedUniqueId
+                                            Name = $archivedName
+                                            ReferencedProcessKey = $processKey
+                                            IsArchived = $true
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch {
+                        Write-Host "  Warning: Failed to fetch batch of archived processes: $($_.Exception.Message)" -ForegroundColor Yellow
+                    }
+                }
+
+                # Check if there are more pages
+                if ($response.items.Count -lt $pageSize) {
+                    $hasMore = $false
+                } else {
+                    $page++
+                }
+            } else {
+                $hasMore = $false
+            }
+        }
+        catch {
+            Write-Host "  Warning: Failed to fetch archived processes page $page : $($_.Exception.Message)" -ForegroundColor Yellow
+            $hasMore = $false
+        }
+    }
+
+    return $archivedDependencies
+}
+
 function Remove-ProcessLinksFromJson {
     param(
         [string]$ProcessJson,
@@ -1460,7 +1614,7 @@ function Remove-ProcessLinksFromJson {
                                 # Clear the linked process fields
                                 $child.LinkedProcessId = $null
                                 $child.LinkedProcessUniqueId = $null
-                                $child.LinkedProcessName = ""
+                                $child.LinkedProcessName = $null
                                 $child.LinkedProcessDisplayName = $null
                                 $child.LinkedProcessGroupId = $null
                                 $child.LinkedProcessGroupName = $null
@@ -1522,6 +1676,14 @@ function Update-ProcessAndPublish {
 
         Write-Host "  Removed $($result.LinksRemoved) link(s)" -ForegroundColor Green
 
+        # Verify ProcessRevisionEditId is preserved in cleaned JSON
+        $cleanedObj = $result.CleanedJson | ConvertFrom-Json
+        if ($cleanedObj.ProcessRevisionEditId -ne $processRevisionEditId) {
+            Write-Host "  WARNING: ProcessRevisionEditId mismatch! Original: $processRevisionEditId, Cleaned: $($cleanedObj.ProcessRevisionEditId)" -ForegroundColor Yellow
+        } else {
+            Write-Host "  ProcessRevisionEditId verified: $processRevisionEditId" -ForegroundColor Gray
+        }
+
         # Step 3: Update process with cleaned JSON
         Write-Host "  Updating process..." -ForegroundColor Gray
 
@@ -1542,12 +1704,18 @@ function Update-ProcessAndPublish {
         $updateUrl = "$SiteURL/Api/v1/Processes/$ProcessUniqueId"
         $updateResult = Invoke-ApiPut -Url $updateUrl -Token $Token -Body $updateBody
 
-        if (-not $updateResult) {
+        if (-not $updateResult -or -not $updateResult.Success) {
             Write-Host "  Failed to update process" -ForegroundColor Red
+            if ($updateResult.Error) {
+                Write-Host "    Error: $($updateResult.Error)" -ForegroundColor Red
+            }
+            if ($updateResult.StatusCode) {
+                Write-Host "    HTTP Status: $($updateResult.StatusCode)" -ForegroundColor Red
+            }
             return $false
         }
 
-        Write-Host "  Process updated successfully" -ForegroundColor Green
+        Write-Host "  Process updated successfully (HTTP $($updateResult.StatusCode))" -ForegroundColor Green
 
         # Step 4: Publish if needed
         if ($wasPreviouslyPublished) {
@@ -1561,10 +1729,13 @@ function Update-ProcessAndPublish {
             if ($ApprovalsEnabled) {
                 Write-Host "  Approvals enabled - submitting for approval and bypassing..." -ForegroundColor Gray
 
+                # Get the updated process JSON with new ProcessRevisionEditId
+                $updatedProcessJson = $updatedProcessData.processJson | ConvertTo-Json -Depth 20 -Compress
+
                 # Submit for approval
                 $submitBody = @{
-                    ProcessJson = $result.CleanedJson
-                    ChangeDescription = "Bulk update."
+                    ProcessJson = $updatedProcessJson
+                    ChangeDescription = "Automated dependency removal"
                     DoSubmitForApproval = $true
                     DoPublish = $false
                     SuppressChangeNotification = $false
@@ -1578,12 +1749,17 @@ function Update-ProcessAndPublish {
 
                 $submitResult = Invoke-ApiPut -Url $updateUrl -Token $Token -Body $submitBody
 
-                if (-not $submitResult) {
+                if (-not $submitResult -or -not $submitResult.Success) {
                     Write-Host "  Failed to submit for approval" -ForegroundColor Red
+                    if ($submitResult.Error) {
+                        Write-Host "    Error: $($submitResult.Error)" -ForegroundColor Red
+                    }
                     return $false
                 }
 
-                # Wait and get the latest ProcessRevisionEditId
+                Write-Host "  Submitted for approval successfully" -ForegroundColor Green
+
+                # Wait and get the latest ProcessRevisionEditId after submit
                 Start-Sleep -Seconds 2
                 $latestProcessData = Invoke-ApiGet -Url $getUrl -Token $Token
                 $latestProcessRevisionEditId = $latestProcessData.processJson.ProcessRevisionEditId
@@ -1869,27 +2045,55 @@ function Invoke-BulkDeleteProcesses {
         return
     }
 
-    # Step 1.5: Get unique IDs for all processes to delete
+    # Step 1.5: Get unique IDs and numeric IDs for all processes to delete
     Write-Host "`n=== Getting Process Details ===" -ForegroundColor Cyan
 
-    $processDeleteMap = @{}  # Maps numeric ID to process details (UniqueId, GroupUniqueId)
+    $processDeleteMap = @{}  # Maps any ID to object with {NumericId, UniqueId, GroupUniqueId}
     foreach ($processId in $processesToDelete) {
-        $getUrl = "$SiteURL/Api/v1/Processes/$processId"
-        $process = Invoke-ApiGet -Url $getUrl -Token $Token
-        if ($process -and $process.uniqueId) {
-            # Get the process status to retrieve group information
-            $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $process.uniqueId
-            $groupUniqueId = if ($processStatus -and $processStatus.ProcessModel.GroupUniqueId) {
-                $processStatus.ProcessModel.GroupUniqueId
-            } else {
-                $null
-            }
+        # Check if the ID is already a GUID (UniqueId) or a numeric ID
+        $guidRegex = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 
-            $processDeleteMap[$processId] = @{
-                UniqueId = $process.uniqueId
-                GroupUniqueId = $groupUniqueId
+        if ($processId -match $guidRegex) {
+            # It's already a UniqueId (GUID format), need to fetch numeric ID and group info
+            Write-Host "  Process UniqueId: $processId (fetching numeric ID and group)" -ForegroundColor Gray
+            $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processId
+            if ($processStatus -and $processStatus.ProcessModel) {
+                $numericId = $processStatus.ProcessModel.Id
+                $groupUniqueId = if ($processStatus.ProcessModel.GroupUniqueId) {
+                    $processStatus.ProcessModel.GroupUniqueId
+                } else {
+                    $null
+                }
+                $processDeleteMap[$processId] = @{
+                    NumericId = $numericId
+                    UniqueId = $processId
+                    GroupUniqueId = $groupUniqueId
+                }
+                Write-Host "    -> Numeric ID: $numericId, GroupUniqueId: $groupUniqueId" -ForegroundColor Gray
+            } else {
+                Write-Host "  Warning: Could not retrieve process details for UniqueId $processId" -ForegroundColor Yellow
             }
-            Write-Host "  Process ID $processId -> UniqueId: $($process.uniqueId), GroupUniqueId: $groupUniqueId" -ForegroundColor Gray
+        } else {
+            # It's a numeric ID, fetch the process to get the UniqueId and group info
+            $getUrl = "$SiteURL/Api/v1/Processes/$processId"
+            $process = Invoke-ApiGet -Url $getUrl -Token $Token
+            if ($process -and $process.uniqueId) {
+                # Get the process status to retrieve group information
+                $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $process.uniqueId
+                $groupUniqueId = if ($processStatus -and $processStatus.ProcessModel.GroupUniqueId) {
+                    $processStatus.ProcessModel.GroupUniqueId
+                } else {
+                    $null
+                }
+                $processDeleteMap[$processId] = @{
+                    NumericId = $processId
+                    UniqueId = $process.uniqueId
+                    GroupUniqueId = $groupUniqueId
+                }
+                Write-Host "  Process ID $processId -> UniqueId: $($process.uniqueId), GroupUniqueId: $groupUniqueId" -ForegroundColor Gray
+            } else {
+                Write-Host "  Warning: Could not retrieve process details for ID $processId" -ForegroundColor Yellow
+            }
         }
     }
 
@@ -1899,9 +2103,11 @@ function Invoke-BulkDeleteProcesses {
     $allDependencies = @()  # Array to store all dependencies
     $dependencyMap = @{}    # Map to track unique dependencies by UniqueId
 
-    foreach ($processId in $processDeleteMap.Keys) {
-        $processUniqueId = $processDeleteMap[$processId].UniqueId
-        Write-Host "Checking dependencies for Process ID $processId (UniqueId: $processUniqueId)..." -ForegroundColor White
+    foreach ($processKey in $processDeleteMap.Keys) {
+        $processInfo = $processDeleteMap[$processKey]
+        $processUniqueId = $processInfo.UniqueId
+        $processNumericId = $processInfo.NumericId
+        Write-Host "Checking dependencies for Process ID $processNumericId (UniqueId: $processUniqueId)..." -ForegroundColor White
 
         $dependencies = Get-ProcessDependencies -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId
 
@@ -1909,12 +2115,6 @@ function Invoke-BulkDeleteProcesses {
             foreach ($depType in $dependencies) {
                 $typeName = $depType.Type
                 Write-Host "  Found $($depType.Dependencies.Count) dependencies of type: $typeName" -ForegroundColor Yellow
-
-                # Skip "Linked Process Group" dependencies as they don't need to be handled
-                if ($typeName -eq "Linked Process Group") {
-                    Write-Host "    Skipping Process Group dependencies (not relevant for deletion)" -ForegroundColor Gray
-                    continue
-                }
 
                 foreach ($dep in $depType.Dependencies) {
                     $depUniqueId = $dep.UniqueId
@@ -1934,8 +2134,9 @@ function Invoke-BulkDeleteProcesses {
                     }
 
                     # Add the current process to the list of processes that reference this dependency
-                    if ($dependencyMap[$depKey].ReferencedByProcesses -notcontains $processId) {
-                        $dependencyMap[$depKey].ReferencedByProcesses += $processId
+                    # Use $processKey (the original ID) as the key for consistency with processDeleteMap
+                    if ($dependencyMap[$depKey].ReferencedByProcesses -notcontains $processKey) {
+                        $dependencyMap[$depKey].ReferencedByProcesses += $processKey
                     }
 
                     Write-Host "    - $depName ($depUniqueId)" -ForegroundColor Gray
@@ -1964,6 +2165,50 @@ function Invoke-BulkDeleteProcesses {
             Write-Host "Operation cancelled by user" -ForegroundColor Yellow
             return
         }
+    }
+
+    # Step 2.5: Check for dependencies in archived processes
+    Write-Host "`n=== PHASE 2.5: Checking Archived Process Dependencies ===" -ForegroundColor Cyan
+    Write-Host "NOTE: The CheckProcessDependencies API only returns dependencies from active processes." -ForegroundColor Gray
+    Write-Host "      We need to separately check archived processes for links to processes being deleted." -ForegroundColor Gray
+
+    $archivedDependencies = Get-ArchivedProcessDependencies -SiteURL $SiteURL -Token $Token -ProcessDeleteMap $processDeleteMap
+
+    if ($archivedDependencies.Count -gt 0) {
+        Write-Host "`nFound $($archivedDependencies.Count) archived process(es) with dependencies:" -ForegroundColor Yellow
+
+        # Add archived dependencies to the dependencyMap
+        foreach ($archivedDep in $archivedDependencies) {
+            $depKey = "$($archivedDep.Type)|$($archivedDep.UniqueId)"
+
+            if (-not $dependencyMap.ContainsKey($depKey)) {
+                $dependencyMap[$depKey] = @{
+                    Type = $archivedDep.Type
+                    UniqueId = $archivedDep.UniqueId
+                    Name = $archivedDep.Name
+                    ReferencedByProcesses = @()
+                    IsArchived = $true
+                }
+            }
+
+            # Add the process key that this archived process references
+            if ($dependencyMap[$depKey].ReferencedByProcesses -notcontains $archivedDep.ReferencedProcessKey) {
+                $dependencyMap[$depKey].ReferencedByProcesses += $archivedDep.ReferencedProcessKey
+            }
+
+            Write-Host "  [Archived] $($archivedDep.Name) ($($archivedDep.UniqueId))" -ForegroundColor White
+            Write-Host "    Has link to process being deleted" -ForegroundColor Gray
+        }
+
+        Write-Host "`nThese archived processes will be restored, have links removed, and then re-archived." -ForegroundColor Cyan
+
+        $proceed = Read-Host "`nDo you want to proceed with archived dependency removal? (Y/N)"
+        if ($proceed -ne 'Y') {
+            Write-Host "Operation cancelled by user" -ForegroundColor Yellow
+            return
+        }
+    } else {
+        Write-Host "No archived process dependencies found" -ForegroundColor Green
     }
 
     # Step 3: Create temporary group for restoring archived dependencies
@@ -2009,8 +2254,12 @@ function Invoke-BulkDeleteProcesses {
                 if ($state -eq "Archived") {
                     Write-Host "  Process is archived - restoring to temporary group..." -ForegroundColor Yellow
 
-                    $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess?id=$numericId&processGroupId=$tempGroupId"
-                    $result = Invoke-ApiPost -Url $restoreUrl -Token $Token
+                    $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess"
+                    $restoreBody = @{
+                        processUniqueId = $dep.UniqueId
+                        processGroupId = $tempGroupId.ToString()
+                    }
+                    $result = Invoke-ApiPost -Url $restoreUrl -Token $Token -Body $restoreBody
 
                     if ($result) {
                         Write-Host "  Successfully restored to temporary group" -ForegroundColor Green
@@ -2029,9 +2278,9 @@ function Invoke-BulkDeleteProcesses {
                 Write-Host "  Could not retrieve process status" -ForegroundColor Red
             }
         } elseif ($dep.Type -eq "Linked Process Group") {
-            Write-Host "Dependency is a Process Group: $($dep.Name) - Groups will be handled separately" -ForegroundColor Cyan
+            Write-Host "Dependency is a Process Group: $($dep.Name) - Will require manual removal" -ForegroundColor Cyan
         } else {
-            Write-Host "Dependency type '$($dep.Type)' - will be handled as needed" -ForegroundColor Cyan
+            Write-Host "Dependency type '$($dep.Type)' - Will require manual removal" -ForegroundColor Cyan
         }
     }
 
@@ -2051,7 +2300,6 @@ function Invoke-BulkDeleteProcesses {
     } else {
         # Separate dependencies by type
         $linkedProcessDeps = @()
-        $linkedProcessGroupDeps = @()
         $manualDeps = @()
 
         foreach ($depKey in $dependencyMap.Keys) {
@@ -2059,10 +2307,8 @@ function Invoke-BulkDeleteProcesses {
             if ($dep.Type -eq "Linked Process") {
                 $linkedProcessDeps += $dep
             }
-            elseif ($dep.Type -eq "Linked Process Group") {
-                $linkedProcessGroupDeps += $dep
-            }
             else {
+                # All other dependencies (including Linked Process Group) require manual removal
                 $manualDeps += $dep
             }
         }
@@ -2087,9 +2333,11 @@ function Invoke-BulkDeleteProcesses {
 
                 # For each process being deleted that references this dependency
                 foreach ($processIdToDelete in $processesToRemoveFrom) {
-                    $processUniqueIdToDelete = $processDeleteMap[$processIdToDelete].UniqueId
+                    $processInfo = $processDeleteMap[$processIdToDelete]
+                    $processUniqueIdToDelete = $processInfo.UniqueId
 
                     Write-Host "  Removing link from dependent process: $($dep.Name) ($($dep.UniqueId))" -ForegroundColor White
+                    Write-Host "    Target process to remove: $processUniqueIdToDelete" -ForegroundColor Gray
 
                     $success = Update-ProcessAndPublish -SiteURL $SiteURL -Token $Token `
                         -ProcessUniqueId $dep.UniqueId `
@@ -2121,20 +2369,7 @@ function Invoke-BulkDeleteProcesses {
             }
         }
 
-        # Handle Linked Process Group dependencies (informational only)
-        if ($linkedProcessGroupDeps.Count -gt 0) {
-            Write-Host "`n--- Linked Process Group Dependencies (No Action Required) ---" -ForegroundColor Cyan
-            Write-Host "The following Process Group dependencies were found but do not need to be removed:" -ForegroundColor Yellow
-
-            foreach ($dep in $linkedProcessGroupDeps) {
-                Write-Host "  - $($dep.Name) (UniqueId: $($dep.UniqueId))" -ForegroundColor Gray
-                Write-Host "    Referenced by $($dep.ReferencedByProcesses.Count) process(es) being deleted" -ForegroundColor Gray
-            }
-
-            Write-Host "`nProcess Group dependencies are informational and do not block deletion." -ForegroundColor Green
-        }
-
-        # Handle manual removal dependencies
+        # Handle manual removal dependencies (includes Linked Process Group and other types)
         if ($manualDeps.Count -gt 0) {
             Write-Host "`n--- Manual Dependency Removal Required ---" -ForegroundColor Yellow
             Write-Host "The following dependencies require MANUAL removal:" -ForegroundColor Yellow
@@ -2153,7 +2388,8 @@ function Invoke-BulkDeleteProcesses {
 
             # Display dependencies grouped by process
             foreach ($processIdToDelete in $manualDepsByProcess.Keys) {
-                $processUniqueIdToDelete = $processDeleteMap[$processIdToDelete].UniqueId
+                $processInfo = $processDeleteMap[$processIdToDelete]
+                $processUniqueIdToDelete = $processInfo.UniqueId
                 $deps = $manualDepsByProcess[$processIdToDelete]
 
                 Write-Host "Process to be deleted: ID $processIdToDelete (UniqueId: $processUniqueIdToDelete)" -ForegroundColor White
@@ -2189,7 +2425,8 @@ function Invoke-BulkDeleteProcesses {
 
                     $validationFailed = $false
                     foreach ($processId in $manualDepsByProcess.Keys) {
-                        $processUniqueId = $processDeleteMap[$processId]
+                        $processInfo = $processDeleteMap[$processId]
+                        $processUniqueId = $processInfo.UniqueId
                         Write-Host "  Checking process $processId..." -ForegroundColor Gray
 
                         $currentDeps = Get-ProcessDependencies -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId
@@ -2198,8 +2435,9 @@ function Invoke-BulkDeleteProcesses {
                         $stillHasDeps = $false
                         if ($currentDeps -and $currentDeps.Count -gt 0) {
                             foreach ($depType in $currentDeps) {
-                                # Skip Linked Process and Linked Process Group (handled separately)
-                                if ($depType.Type -ne "Linked Process" -and $depType.Type -ne "Linked Process Group") {
+                                # Skip only Linked Process (automatically handled)
+                                # Include Linked Process Group since it requires manual removal
+                                if ($depType.Type -ne "Linked Process") {
                                     if ($depType.Dependencies -and $depType.Dependencies.Count -gt 0) {
                                         $stillHasDeps = $true
                                         Write-Host "    WARNING: Process still has $($depType.Dependencies.Count) dependencies of type '$($depType.Type)'" -ForegroundColor Red
@@ -2246,16 +2484,18 @@ function Invoke-BulkDeleteProcesses {
         return
     }
 
-    foreach ($processId in $processesToDelete) {
-        $processUniqueId = $processDeleteMap[$processId].UniqueId
+    foreach ($processKey in $processDeleteMap.Keys) {
+        $processInfo = $processDeleteMap[$processKey]
+        $processNumericId = $processInfo.NumericId
+        $processUniqueId = $processInfo.UniqueId
 
         # Check if process is already archived
         $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId
 
         if ($processStatus -and $processStatus.ProcessModel.State -eq "Archived") {
-            Write-Host "Process $processId is already archived - skipping" -ForegroundColor Gray
+            Write-Host "Process $processNumericId is already archived - skipping" -ForegroundColor Gray
         } else {
-            Write-Host "Archiving Process $processId" -ForegroundColor White
+            Write-Host "Archiving Process $processNumericId" -ForegroundColor White
             Archive-Process -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId -Comment "Pre-delete archive" | Out-Null
         }
     }
@@ -2269,24 +2509,28 @@ function Invoke-BulkDeleteProcesses {
         return
     }
 
-    foreach ($processId in $processesToDelete) {
-        $processUniqueId = $processDeleteMap[$processId].UniqueId
-        $processGroupUniqueId = $processDeleteMap[$processId].GroupUniqueId
+    foreach ($processKey in $processDeleteMap.Keys) {
+        $processInfo = $processDeleteMap[$processKey]
+        $processNumericId = $processInfo.NumericId
+        $processUniqueId = $processInfo.UniqueId
+        $processGroupUniqueId = $processInfo.GroupUniqueId
 
-        Write-Host "Deleting Process $processId (UniqueId: $processUniqueId)" -ForegroundColor Red
+        Write-Host "Deleting Process $processNumericId (UniqueId: $processUniqueId)" -ForegroundColor Red
 
         $result = Delete-Process -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId -ProcessGroupUniqueId $processGroupUniqueId
 
         if ($result) {
             $results += [PSCustomObject]@{
-                ProcessID = $processId
+                ProcessID = $processNumericId
+                ProcessUniqueId = $processUniqueId
                 Operation = "Delete"
                 Status = "Success"
                 Message = "Deleted"
             }
         } else {
             $results += [PSCustomObject]@{
-                ProcessID = $processId
+                ProcessID = $processNumericId
+                ProcessUniqueId = $processUniqueId
                 Operation = "Delete"
                 Status = "Failed"
                 Message = "Delete failed"
