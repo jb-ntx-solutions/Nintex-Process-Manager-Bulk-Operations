@@ -1415,11 +1415,11 @@ function Get-ArchivedProcessDependencies {
             $listUrl = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$pageSize&ListType=7"
             $response = Invoke-ApiGet -Url $listUrl -Token $Token
 
-            if ($response -and $response.processes -and $response.processes.Count -gt 0) {
-                Write-Host "  Page $page : Found $($response.processes.Count) archived processes" -ForegroundColor Gray
+            if ($response -and $response.items -and $response.items.Count -gt 0) {
+                Write-Host "  Page $page : Found $($response.items.Count) archived processes" -ForegroundColor Gray
 
                 # Collect UniqueIds for batch fetching
-                $uniqueIds = $response.processes | ForEach-Object { $_.processUniqueId }
+                $uniqueIds = $response.items | ForEach-Object { $_.processUniqueId }
 
                 # Step 2: Batch fetch archived process details (10-20 per batch for efficiency)
                 $batchSize = 15
@@ -1431,12 +1431,12 @@ function Get-ArchivedProcessDependencies {
                         $batchUrl = "$SiteURL/mobile/api/v1/processes?processUniqueIds=$batchUniqueIds"
                         $batchResponse = Invoke-ApiGet -Url $batchUrl -Token $Token
 
-                        if ($batchResponse -and $batchResponse.Count -gt 0) {
+                        if ($batchResponse -and $batchResponse.data -and $batchResponse.data.Count -gt 0) {
                             # Step 3: Search each archived process for links to processes being deleted
-                            foreach ($archivedProcess in $batchResponse) {
-                                $archivedUniqueId = $archivedProcess.uniqueId
-                                $archivedName = $archivedProcess.name
-                                $archivedProcessJson = $archivedProcess.processJson | ConvertTo-Json -Depth 20 -Compress
+                            foreach ($archivedProcess in $batchResponse.data) {
+                                $archivedUniqueId = $archivedProcess.ProcessModel.UniqueId
+                                $archivedName = $archivedProcess.ProcessModel.Name
+                                $archivedProcessJson = $archivedProcess.ProcessModel | ConvertTo-Json -Depth 20 -Compress
 
                                 # Check if this archived process has links to any process being deleted
                                 foreach ($processKey in $ProcessDeleteMap.Keys) {
@@ -1465,7 +1465,7 @@ function Get-ArchivedProcessDependencies {
                 }
 
                 # Check if there are more pages
-                if ($response.processes.Count -lt $pageSize) {
+                if ($response.items.Count -lt $pageSize) {
                     $hasMore = $false
                 } else {
                     $page++
