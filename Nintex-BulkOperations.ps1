@@ -124,6 +124,9 @@ function Invoke-ApiPost {
         [object]$Body = $null
     )
 
+    # Debug output
+    Write-Host "  [INVOKE-APIPOST V2.2 ENTRY] URL: $Url" -ForegroundColor Cyan
+
     try {
         $headers = @{
             "Authorization" = "Bearer $Token"
@@ -132,15 +135,34 @@ function Invoke-ApiPost {
             "X-Requested-With" = "XMLHttpRequest"
         }
 
+        # Debug: Show headers for BFF calls
+        if ($Url -like "*bff/*") {
+            Write-Host "  [INVOKE-APIPOST V2.2] BFF API detected - using X-Requested-With header" -ForegroundColor DarkGreen
+            Write-Host "  [INVOKE-APIPOST V2.2] Headers: Authorization=Bearer ***, Accept=application/json, Content-Type=application/json, X-Requested-With=XMLHttpRequest" -ForegroundColor DarkGray
+        }
+
         if ($Body) {
             $jsonBody = $Body | ConvertTo-Json -Depth 10
-            return Invoke-RestMethod -Uri $Url -Method Post -Headers $headers -Body $jsonBody
+            Write-Host "  [INVOKE-APIPOST V2.2] Request body: $jsonBody" -ForegroundColor DarkGray
+            $response = Invoke-RestMethod -Uri $Url -Method Post -Headers $headers -Body $jsonBody
         } else {
-            return Invoke-RestMethod -Uri $Url -Method Post -Headers $headers
+            Write-Host "  [INVOKE-APIPOST V2.2] No body (empty POST)" -ForegroundColor DarkGray
+            $response = Invoke-RestMethod -Uri $Url -Method Post -Headers $headers
         }
+
+        # Debug: Check response type
+        $responseType = if ($response) { $response.GetType().Name } else { "null" }
+        Write-Host "  [INVOKE-APIPOST V2.2] Response type: $responseType" -ForegroundColor DarkGray
+        if ($response) {
+            Write-Host "  [INVOKE-APIPOST V2.2] Response: $($response | ConvertTo-Json -Compress -Depth 2)" -ForegroundColor DarkGray
+        }
+
+        return $response
     }
     catch {
-        Write-Host "API POST Error ($Url): $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  [INVOKE-APIPOST V2.2 ERROR] $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  [INVOKE-APIPOST V2.2 ERROR] Status Code: $($_.Exception.Response.StatusCode.value__)" -ForegroundColor Red
+        Write-Host "  [INVOKE-APIPOST V2.2 ERROR] Status Description: $($_.Exception.Response.StatusDescription)" -ForegroundColor Red
         return $null
     }
 }
@@ -416,8 +438,14 @@ function Invoke-ArchiveDocument {
         [int]$DocumentId
     )
 
+    Write-Host "  [ARCHIVE-DOCUMENT] Archiving document ID: $DocumentId" -ForegroundColor Magenta
     $url = "$SiteURL/bff/document/api/v1/documents/$DocumentId/archive"
+    Write-Host "  [ARCHIVE-DOCUMENT] Archive URL: $url" -ForegroundColor Magenta
+
     $response = Invoke-ApiPost -Url $url -Token $Token -Body @{}
+
+    Write-Host "  [ARCHIVE-DOCUMENT] Archive response: $(if ($response) { 'Success' } else { 'Failed/Null' })" -ForegroundColor Magenta
+
     return $response
 }
 
