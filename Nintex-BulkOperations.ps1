@@ -110,6 +110,7 @@ function Invoke-ApiPost {
             "Authorization" = "Bearer $Token"
             "Content-Type" = "application/json"
             "Accept" = "application/json"
+            "X-Requested-With" = "XMLHttpRequest"
         }
 
         if ($Body) {
@@ -978,7 +979,7 @@ function Invoke-BulkRestore {
     else {  # Restore all archived items
         if ($ObjectType -eq "Processes" -or $ObjectType -eq "Both") {
             $processes = Get-ArchivedProcesses -SiteURL $SiteURL -Token $Token
-            $processesToRestore = $processes | ForEach-Object { $_.id }
+            $processesToRestore = $processes | ForEach-Object { $_.processUniqueId }
             Write-Host "Found $($processesToRestore.Count) archived processes" -ForegroundColor Green
         }
 
@@ -994,8 +995,12 @@ function Invoke-BulkRestore {
         foreach ($processId in $processesToRestore) {
             Write-Host "Restoring Process ID: $processId" -ForegroundColor White
 
-            $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess?id=$processId&processGroupId=$RestoreGroupID"
-            $result = Invoke-ApiPost -Url $restoreUrl -Token $Token
+            $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess"
+            $restoreBody = @{
+                processUniqueId = $processId
+                processGroupId = $RestoreGroupID.ToString()
+            }
+            $result = Invoke-ApiPost -Url $restoreUrl -Token $Token -Body $restoreBody
 
             if ($result) {
                 # Verify restore
@@ -2159,8 +2164,12 @@ function Invoke-BulkDeleteProcesses {
                 if ($state -eq "Archived") {
                     Write-Host "  Process is archived - restoring to temporary group..." -ForegroundColor Yellow
 
-                    $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess?id=$numericId&processGroupId=$tempGroupId"
-                    $result = Invoke-ApiPost -Url $restoreUrl -Token $Token
+                    $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess"
+                    $restoreBody = @{
+                        processUniqueId = $dep.UniqueId
+                        processGroupId = $tempGroupId.ToString()
+                    }
+                    $result = Invoke-ApiPost -Url $restoreUrl -Token $Token -Body $restoreBody
 
                     if ($result) {
                         Write-Host "  Successfully restored to temporary group" -ForegroundColor Green
