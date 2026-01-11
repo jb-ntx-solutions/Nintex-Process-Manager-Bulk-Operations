@@ -192,53 +192,56 @@ function Get-ProcessesFromGroup {
         [bool]$IncludeSubgroups = $true
     )
 
-    Write-Host "  Looking for processes in group ID: $GroupID (Include subgroups: $IncludeSubgroups)" -ForegroundColor Gray
+    Write-Host "  Looking for processes in group (Include subgroups: $IncludeSubgroups)" -ForegroundColor Gray
+
+    if (-not $GroupUniqueId) {
+        Write-Host "  Error: GroupUniqueId is required for efficient group querying" -ForegroundColor Red
+        return @()
+    }
 
     $allProcesses = @()
-    $pageSize = 200
-    $page = 1
 
-    do {
-        $url = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$pageSize"
-        Write-Host "    DEBUG: Calling API: $url" -ForegroundColor Cyan
-        $response = Invoke-ApiGet -Url $url -Token $Token
+    # Use the breadcrumb/children endpoint for efficient server-side filtering
+    # This returns only the direct children of the specified group
+    $url = "$SiteURL/bff/navigation/api/v1/breadcrumb/children?type=ProcessGroup&id=$GroupUniqueId"
+    Write-Host "    Fetching children of group..." -ForegroundColor Gray
 
-        Write-Host "    DEBUG: Response type: $($response.GetType().Name)" -ForegroundColor Cyan
-        Write-Host "    DEBUG: Response has 'items' property: $($response.PSObject.Properties.Name -contains 'items')" -ForegroundColor Cyan
-        if ($response) {
-            Write-Host "    DEBUG: Response properties: $($response.PSObject.Properties.Name -join ', ')" -ForegroundColor Cyan
-        }
+    $response = Invoke-ApiGet -Url $url -Token $Token
 
-        if ($response -and $response.items) {
-            Write-Host "    Page ${page}: Fetched $($response.items.Count) processes" -ForegroundColor Gray
+    if ($response -and $response.breadcrumbItems) {
+        # Filter for processes (type = "Process")
+        $processes = $response.breadcrumbItems | Where-Object { $_.type -eq "Process" }
 
-            # Debug: Show sample process properties on first page
-            if ($page -eq 1 -and $response.items.Count -gt 0) {
-                $sampleProcess = $response.items[0]
-                Write-Host "    Sample process: $($sampleProcess.processName)" -ForegroundColor Gray
-                Write-Host "    Properties: groupId=$($sampleProcess.groupId), groupUniqueId=$($sampleProcess.groupUniqueId)" -ForegroundColor Gray
-            }
+        if ($processes) {
+            Write-Host "    Found $($processes.Count) processes in this group" -ForegroundColor Gray
 
-            # Filter processes by group
-            $groupProcesses = $response.items | Where-Object {
-                if ($GroupUniqueId) {
-                    # If we have a uniqueId, use that for filtering
-                    $_.groupUniqueId -eq $GroupUniqueId
-                } else {
-                    # Otherwise use numeric groupId
-                    $_.groupId -eq $GroupID
+            # Map breadcrumb format to expected format
+            # The breadcrumb 'id' is the process unique ID
+            $allProcesses += $processes | ForEach-Object {
+                [PSCustomObject]@{
+                    processUniqueId = $_.id
+                    processName = $_.name
+                    groupUniqueId = $_.parentId
+                    version = $_.version
                 }
             }
-
-            if ($groupProcesses.Count -gt 0) {
-                Write-Host "    Found $($groupProcesses.Count) matching processes on this page" -ForegroundColor Gray
-            }
-
-            $allProcesses += $groupProcesses
         }
 
-        $page++
-    } while ($response -and $response.items -and $response.items.Count -eq $pageSize)
+        # If including subgroups, recursively get processes from child groups
+        if ($IncludeSubgroups) {
+            $subgroups = $response.breadcrumbItems | Where-Object { $_.type -eq "ProcessGroup" }
+
+            if ($subgroups) {
+                Write-Host "    Found $($subgroups.Count) subgroups, checking recursively..." -ForegroundColor Gray
+
+                foreach ($subgroup in $subgroups) {
+                    $subgroupProcesses = Get-ProcessesFromGroup -SiteURL $SiteURL -Token $Token `
+                        -GroupID 0 -GroupUniqueId $subgroup.id -IncludeSubgroups $true
+                    $allProcesses += $subgroupProcesses
+                }
+            }
+        }
+    }
 
     Write-Host "  Total processes found: $($allProcesses.Count)" -ForegroundColor Green
     return $allProcesses
@@ -553,13 +556,9 @@ function New-ProcessGroup {
             return $null
         }
 
-        Write-Host "  DEBUG: Create response: $($createResponse | ConvertTo-Json -Depth 2)" -ForegroundColor Cyan
-
         # Extract the new group's uniqueId from the response
         # The API returns "groupid" (lowercase) which is the uniqueId
         $newGroupUniqueId = $createResponse.groupid
-
-        Write-Host "  DEBUG: Extracted groupid: '$newGroupUniqueId'" -ForegroundColor Cyan
 
         if (-not $newGroupUniqueId) {
             Write-Host "Failed to create group. Response did not contain groupid." -ForegroundColor Red
@@ -843,7 +842,7 @@ function Invoke-BulkArchive {
         if ($ObjectType -eq "Processes" -or $ObjectType -eq "Both") {
             $includeSubgroups = (Read-Host "Include subgroups? (Y/N)") -eq 'Y'
             $processes = Get-ProcessesFromGroup -SiteURL $SiteURL -Token $Token -GroupID $GroupID -GroupUniqueId $GroupUniqueId -IncludeSubgroups $includeSubgroups
-            $processesToArchive = $processes | ForEach-Object { $_.id }
+            $processesToArchive = $processes | ForEach-Object { $_.processUniqueId }
             Write-Host "Found $($processesToArchive.Count) processes to archive" -ForegroundColor Green
         }
 
@@ -2126,7 +2125,7 @@ function Invoke-BulkDeleteProcesses {
     else {  # Group-based
         $includeSubgroups = (Read-Host "Include subgroups? (Y/N)") -eq 'Y'
         $processes = Get-ProcessesFromGroup -SiteURL $SiteURL -Token $Token -GroupID $GroupID -GroupUniqueId $GroupUniqueId -IncludeSubgroups $includeSubgroups
-        $processesToDelete = $processes | ForEach-Object { $_.id }
+        $processesToDelete = $processes | ForEach-Object { $_.processUniqueId }
     }
 
     Write-Host "Identified $($processesToDelete.Count) processes to delete" -ForegroundColor Green
