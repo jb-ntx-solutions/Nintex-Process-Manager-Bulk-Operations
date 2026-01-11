@@ -478,27 +478,6 @@ function Get-ArchivedProcesses {
     return $allProcesses
 }
 
-function Get-DocumentsFromGroup {
-    param(
-        [string]$SiteURL,
-        [string]$Token,
-        [int]$GroupID,
-        [bool]$IncludeSubgroups = $true
-    )
-
-    # Note: This is a placeholder. Adjust the API endpoint based on your Nintex PM version
-    # Some versions use /Api/v1/Documents, others may use different endpoints
-    try {
-        $url = "$SiteURL/Api/v1/ProcessGroups/$GroupID/Documents"
-        $response = Invoke-ApiGet -Url $url -Token $Token
-        return $response
-    }
-    catch {
-        Write-Host "Document retrieval not available or endpoint differs" -ForegroundColor Yellow
-        return @()
-    }
-}
-
 # ============================================================================
 # CSV PROCESSING
 # ============================================================================
