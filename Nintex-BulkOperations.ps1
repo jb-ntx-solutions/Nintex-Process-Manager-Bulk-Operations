@@ -89,6 +89,8 @@ function Invoke-ApiGet {
         $headers = @{
             "Authorization" = "Bearer $Token"
             "Accept" = "application/json"
+            "Content-Type" = "application/json"
+            "X-Requested-With" = "XMLHttpRequest"
         }
         return Invoke-RestMethod -Uri $Url -Method Get -Headers $headers
     }
