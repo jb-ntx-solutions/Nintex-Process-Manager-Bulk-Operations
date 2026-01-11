@@ -179,6 +179,34 @@ function Invoke-ApiPut {
     }
 }
 
+function Invoke-ApiDelete {
+    param(
+        [string]$Url,
+        [string]$Token,
+        [object]$Body = $null
+    )
+
+    try {
+        $headers = @{
+            "Authorization" = "Bearer $Token"
+            "Content-Type" = "application/json"
+            "Accept" = "application/json"
+            "X-Requested-With" = "XMLHttpRequest"
+        }
+
+        if ($Body) {
+            $jsonBody = $Body | ConvertTo-Json -Depth 10
+            return Invoke-RestMethod -Uri $Url -Method Delete -Headers $headers -Body $jsonBody
+        } else {
+            return Invoke-RestMethod -Uri $Url -Method Delete -Headers $headers
+        }
+    }
+    catch {
+        Write-Host "API DELETE Error ($Url): $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
+}
+
 # ============================================================================
 # PROCESS AND DOCUMENT RETRIEVAL
 # ============================================================================
@@ -245,6 +273,112 @@ function Get-ProcessesFromGroup {
 
     Write-Host "  Total processes found: $($allProcesses.Count)" -ForegroundColor Green
     return $allProcesses
+}
+
+function Get-DocumentsFromGroup {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$GroupUniqueId,
+        [bool]$IncludeSubgroups = $true
+    )
+
+    Write-Host "  Fetching documents from group (Include subgroups: $IncludeSubgroups)..." -ForegroundColor Gray
+
+    if (-not $GroupUniqueId) {
+        Write-Host "  Error: GroupUniqueId is required" -ForegroundColor Red
+        return @()
+    }
+
+    $allDocuments = @()
+    $pageSize = 200
+    $page = 1
+
+    do {
+        $url = "$SiteURL/bff/document/api/v1/documents?Page=$page&PageSize=$pageSize&ListType=All&DocumentType=All&ProcessGroupId=$GroupUniqueId"
+        $response = Invoke-ApiGet -Url $url -Token $Token
+
+        if ($response -and $response.items) {
+            Write-Host "    Page ${page}: Fetched $($response.items.Count) documents" -ForegroundColor Gray
+
+            # If not including subgroups, filter to only documents in the target group
+            if ($IncludeSubgroups) {
+                $allDocuments += $response.items
+            } else {
+                $groupDocuments = $response.items | Where-Object {
+                    $_.primaryGroupUniqueId -eq $GroupUniqueId
+                }
+                if ($groupDocuments) {
+                    Write-Host "    Found $($groupDocuments.Count) documents in target group only" -ForegroundColor Gray
+                    $allDocuments += $groupDocuments
+                }
+            }
+        }
+
+        $page++
+    } while ($response -and $response.items -and $response.items.Count -eq $pageSize)
+
+    Write-Host "  Total documents found: $($allDocuments.Count)" -ForegroundColor Green
+    return $allDocuments
+}
+
+function Get-DocumentProperties {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [int]$DocumentId
+    )
+
+    $url = "$SiteURL/bff/document/api/v1/documents/$DocumentId/properties"
+    $response = Invoke-ApiGet -Url $url -Token $Token
+    return $response
+}
+
+function Test-DocumentHasAttachedProcesses {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [int]$DocumentId
+    )
+
+    $properties = Get-DocumentProperties -SiteURL $SiteURL -Token $Token -DocumentId $DocumentId
+
+    if ($properties -and $properties.attachedProcesses -and $properties.attachedProcesses.Count -gt 0) {
+        return $true
+    }
+    return $false
+}
+
+function Invoke-ArchiveDocument {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [int]$DocumentId
+    )
+
+    $url = "$SiteURL/bff/document/api/v1/documents/$DocumentId/archive"
+    $response = Invoke-ApiPost -Url $url -Token $Token -Body @{}
+    return $response
+}
+
+function Invoke-DeleteDocuments {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [array]$DocumentIds
+    )
+
+    if ($DocumentIds.Count -eq 0) {
+        return $null
+    }
+
+    $url = "$SiteURL/bff/document/api/v1/documents/bulk"
+    $body = @{
+        documentIds = $DocumentIds
+    }
+
+    $response = Invoke-ApiDelete -Url $url -Token $Token -Body $body
+    return $response
 }
 
 function Get-ArchivedProcesses {
@@ -2107,6 +2241,9 @@ function Invoke-BulkDeleteProcesses {
 
     $results = @()
     $processesToDelete = @()
+    $documentsToDelete = @()
+    $deleteDocuments = $false
+    $includeSubgroups = $false
 
     # Step 1: Gather processes to delete
     Write-Host "`n=== PHASE 1: Gathering Processes ===" -ForegroundColor Cyan
@@ -2124,8 +2261,18 @@ function Invoke-BulkDeleteProcesses {
     }
     else {  # Group-based
         $includeSubgroups = (Read-Host "Include subgroups? (Y/N)") -eq 'Y'
+        $deleteDocuments = (Read-Host "Also delete documents from this group? (Y/N)") -eq 'Y'
+
         $processes = Get-ProcessesFromGroup -SiteURL $SiteURL -Token $Token -GroupID $GroupID -GroupUniqueId $GroupUniqueId -IncludeSubgroups $includeSubgroups
         $processesToDelete = $processes | ForEach-Object { $_.processUniqueId }
+
+        # If deleting documents, fetch them now
+        if ($deleteDocuments) {
+            Write-Host "`n  Fetching documents..." -ForegroundColor Gray
+            $documents = Get-DocumentsFromGroup -SiteURL $SiteURL -Token $Token -GroupUniqueId $GroupUniqueId -IncludeSubgroups $includeSubgroups
+            $documentsToDelete = $documents
+            Write-Host "  Found $($documentsToDelete.Count) documents" -ForegroundColor Green
+        }
     }
 
     Write-Host "Identified $($processesToDelete.Count) processes to delete" -ForegroundColor Green
@@ -2626,6 +2773,110 @@ function Invoke-BulkDeleteProcesses {
     }
 
     Write-Host "`nRe-archived $($restoredDependencies.Count) dependencies" -ForegroundColor Green
+
+    # Step 8.5: Delete documents (if requested)
+    if ($deleteDocuments -and $documentsToDelete.Count -gt 0) {
+        Write-Host "`n=== PHASE 8.5: Deleting Documents ===" -ForegroundColor Cyan
+        Write-Host "Found $($documentsToDelete.Count) documents to process" -ForegroundColor Gray
+
+        $documentsToArchive = @()
+        $documentsSkipped = @()
+
+        # Check each document for attached processes
+        foreach ($doc in $documentsToDelete) {
+            Write-Host "  Checking document: $($doc.documentName) (ID: $($doc.documentId))" -ForegroundColor White
+
+            $hasAttachedProcesses = Test-DocumentHasAttachedProcesses -SiteURL $SiteURL -Token $Token -DocumentId $doc.documentId
+
+            if ($hasAttachedProcesses) {
+                Write-Host "    Skipping - has attached processes" -ForegroundColor Yellow
+                $documentsSkipped += [PSCustomObject]@{
+                    DocumentId = $doc.documentId
+                    DocumentName = $doc.documentName
+                    DocumentUniqueId = $doc.documentUniqueId
+                    Reason = "Has attached processes"
+                }
+            } else {
+                $documentsToArchive += $doc
+                Write-Host "    Eligible for deletion" -ForegroundColor Gray
+            }
+        }
+
+        Write-Host "`nDocuments eligible for deletion: $($documentsToArchive.Count)" -ForegroundColor Green
+        Write-Host "Documents skipped: $($documentsSkipped.Count)" -ForegroundColor Yellow
+
+        if ($documentsToArchive.Count -gt 0) {
+            # Archive documents first
+            Write-Host "`n  Archiving documents..." -ForegroundColor Gray
+            $archivedCount = 0
+            $archiveFailedCount = 0
+
+            foreach ($doc in $documentsToArchive) {
+                Write-Host "    Archiving: $($doc.documentName)" -ForegroundColor White
+                $archiveResult = Invoke-ArchiveDocument -SiteURL $SiteURL -Token $Token -DocumentId $doc.documentId
+
+                if ($archiveResult) {
+                    $archivedCount++
+                } else {
+                    Write-Host "      Failed to archive" -ForegroundColor Red
+                    $archiveFailedCount++
+                }
+            }
+
+            Write-Host "  Archived: $archivedCount, Failed: $archiveFailedCount" -ForegroundColor Gray
+
+            # Delete archived documents (bulk operation)
+            if ($archivedCount -gt 0) {
+                Write-Host "`n  Deleting archived documents..." -ForegroundColor Gray
+                $documentIds = $documentsToArchive | ForEach-Object { $_.documentId }
+
+                $deleteResult = Invoke-DeleteDocuments -SiteURL $SiteURL -Token $Token -DocumentIds $documentIds
+
+                if ($deleteResult) {
+                    Write-Host "  Successfully deleted $($documentIds.Count) documents" -ForegroundColor Green
+
+                    # Add to results
+                    foreach ($doc in $documentsToArchive) {
+                        $results += [PSCustomObject]@{
+                            Type = "Document"
+                            Name = $doc.documentName
+                            ID = $doc.documentUniqueId
+                            Status = "Success"
+                            Message = "Deleted"
+                        }
+                    }
+                } else {
+                    Write-Host "  Failed to delete documents" -ForegroundColor Red
+
+                    # Mark as failed in results
+                    foreach ($doc in $documentsToArchive) {
+                        $results += [PSCustomObject]@{
+                            Type = "Document"
+                            Name = $doc.documentName
+                            ID = $doc.documentUniqueId
+                            Status = "Failed"
+                            Message = "Delete operation failed"
+                        }
+                    }
+                }
+            }
+        }
+
+        # Add skipped documents to results
+        foreach ($skipped in $documentsSkipped) {
+            $results += [PSCustomObject]@{
+                Type = "Document"
+                Name = $skipped.DocumentName
+                ID = $skipped.DocumentUniqueId
+                Status = "Skipped"
+                Message = $skipped.Reason
+            }
+        }
+
+        Write-Host "`nDocument deletion phase complete" -ForegroundColor Green
+        Write-Host "  Deleted: $($documentsToArchive.Count)" -ForegroundColor Cyan
+        Write-Host "  Skipped: $($documentsSkipped.Count)" -ForegroundColor Yellow
+    }
 
     # Step 9: Clean up temp group
     Write-Host "`n=== PHASE 9: Cleanup ===" -ForegroundColor Cyan
