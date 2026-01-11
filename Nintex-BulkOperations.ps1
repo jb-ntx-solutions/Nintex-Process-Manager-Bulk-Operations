@@ -591,6 +591,37 @@ function New-ProcessGroup {
     }
 }
 
+function Delete-ProcessGroup {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$GroupUniqueId
+    )
+
+    try {
+        Write-Host "Deleting process group (UniqueId: $GroupUniqueId)..." -ForegroundColor Gray
+
+        $deleteUrl = "$SiteURL/Process/Edit/DeleteGroup"
+        $deleteBody = @{
+            processGroupUniqueId = $GroupUniqueId
+        }
+
+        $result = Invoke-ApiPost -Url $deleteUrl -Token $Token -Body $deleteBody
+
+        if ($result) {
+            Write-Host "  Successfully deleted temporary group" -ForegroundColor Green
+            return $true
+        } else {
+            Write-Host "  Failed to delete group" -ForegroundColor Red
+            return $false
+        }
+    }
+    catch {
+        Write-Host "  Error deleting process group: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    }
+}
+
 function Show-GroupTree {
     param(
         [array]$Groups,
@@ -2631,7 +2662,13 @@ function Invoke-BulkDeleteProcesses {
 
     # Step 9: Clean up temp group
     Write-Host "`n=== PHASE 9: Cleanup ===" -ForegroundColor Cyan
-    Write-Host "You should manually delete the temporary group (ID: $tempGroupId) if it's empty" -ForegroundColor Yellow
+    Write-Host "Deleting temporary group (ID: $tempGroupId, UniqueId: $tempGroupUniqueId)..." -ForegroundColor White
+
+    $deleteSuccess = Delete-ProcessGroup -SiteURL $SiteURL -Token $Token -GroupUniqueId $tempGroupUniqueId
+
+    if (-not $deleteSuccess) {
+        Write-Host "  Warning: Failed to delete temporary group. You may need to delete it manually." -ForegroundColor Yellow
+    }
 
     # Save results
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
