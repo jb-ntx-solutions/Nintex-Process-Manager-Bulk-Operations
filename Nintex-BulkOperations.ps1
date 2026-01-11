@@ -1,5 +1,5 @@
 # Nintex Process Manager Bulk Operations Script
-# Version 2.3 (HTTP 204 Response Handling)
+# Version 2.4 (Clean Output)
 # Supports: Archive, Restore, Update Location, Update Ownership, and Delete operations
 
 #Requires -Version 5.1
@@ -85,11 +85,7 @@ function Invoke-ApiGet {
         [string]$Token
     )
 
-    # ALWAYS show we're in the V2.1 function
-    Write-Host "  [INVOKE-APIGET V2.1 ENTRY] URL: $Url" -ForegroundColor Cyan
-
     try {
-        # V2: Added X-Requested-With header for BFF APIs
         $headers = @{
             "Authorization" = "Bearer $Token"
             "Accept" = "application/json"
@@ -97,22 +93,11 @@ function Invoke-ApiGet {
             "X-Requested-With" = "XMLHttpRequest"
         }
 
-        # Debug: Confirm headers for BFF calls
-        if ($Url -like "*bff/*") {
-            Write-Host "  [INVOKE-APIGET V2.1] BFF API detected - using X-Requested-With header" -ForegroundColor DarkGreen
-            Write-Host "  [INVOKE-APIGET V2.1] Headers: Authorization=Bearer ***, Accept=application/json, Content-Type=application/json, X-Requested-With=XMLHttpRequest" -ForegroundColor DarkGray
-        }
-
         $response = Invoke-RestMethod -Uri $Url -Method Get -Headers $headers
-
-        # Debug: Check response type
-        $responseType = $response.GetType().Name
-        Write-Host "  [INVOKE-APIGET V2.1] Response type: $responseType" -ForegroundColor DarkGray
-
         return $response
     }
     catch {
-        Write-Host "  [INVOKE-APIGET V2.1 ERROR] $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "API GET Error ($Url): $($_.Exception.Message)" -ForegroundColor Red
         return $null
     }
 }
@@ -124,9 +109,6 @@ function Invoke-ApiPost {
         [object]$Body = $null
     )
 
-    # Debug output
-    Write-Host "  [INVOKE-APIPOST V2.2 ENTRY] URL: $Url" -ForegroundColor Cyan
-
     try {
         $headers = @{
             "Authorization" = "Bearer $Token"
@@ -135,48 +117,34 @@ function Invoke-ApiPost {
             "X-Requested-With" = "XMLHttpRequest"
         }
 
-        # Debug: Show headers for BFF calls
-        if ($Url -like "*bff/*") {
-            Write-Host "  [INVOKE-APIPOST V2.2] BFF API detected - using X-Requested-With header" -ForegroundColor DarkGreen
-            Write-Host "  [INVOKE-APIPOST V2.2] Headers: Authorization=Bearer ***, Accept=application/json, Content-Type=application/json, X-Requested-With=XMLHttpRequest" -ForegroundColor DarkGray
-        }
-
-        # Use Invoke-WebRequest to get status code
+        # Use Invoke-WebRequest to get status code for 204 handling
         if ($Body) {
             $jsonBody = $Body | ConvertTo-Json -Depth 10
-            Write-Host "  [INVOKE-APIPOST V2.2] Request body: $jsonBody" -ForegroundColor DarkGray
             $webResponse = Invoke-WebRequest -Uri $Url -Method Post -Headers $headers -Body $jsonBody -UseBasicParsing
         } else {
-            Write-Host "  [INVOKE-APIPOST V2.2] No body (empty POST)" -ForegroundColor DarkGray
             $webResponse = Invoke-WebRequest -Uri $Url -Method Post -Headers $headers -UseBasicParsing
         }
 
-        # Check status code
         $statusCode = $webResponse.StatusCode
-        Write-Host "  [INVOKE-APIPOST V2.2] HTTP Status Code: $statusCode" -ForegroundColor DarkGray
 
         # 200-299 are success codes
         if ($statusCode -ge 200 -and $statusCode -lt 300) {
             if ($webResponse.Content) {
                 $response = $webResponse.Content | ConvertFrom-Json
-                Write-Host "  [INVOKE-APIPOST V2.2] Response type: $($response.GetType().Name)" -ForegroundColor DarkGray
-                Write-Host "  [INVOKE-APIPOST V2.2] Response: $($response | ConvertTo-Json -Compress -Depth 2)" -ForegroundColor DarkGray
                 return $response
             } else {
                 # 204 No Content or other success with no body - return success indicator
-                Write-Host "  [INVOKE-APIPOST V2.2] Success with no content (HTTP $statusCode)" -ForegroundColor DarkGreen
                 return @{ success = $true; statusCode = $statusCode }
             }
         } else {
-            Write-Host "  [INVOKE-APIPOST V2.2 WARNING] Unexpected status code: $statusCode" -ForegroundColor Yellow
             return $null
         }
     }
     catch {
-        Write-Host "  [INVOKE-APIPOST V2.2 ERROR] $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "API POST Error ($Url): $($_.Exception.Message)" -ForegroundColor Red
         if ($_.Exception.Response) {
-            Write-Host "  [INVOKE-APIPOST V2.2 ERROR] Status Code: $($_.Exception.Response.StatusCode.value__)" -ForegroundColor Red
-            Write-Host "  [INVOKE-APIPOST V2.2 ERROR] Status Description: $($_.Exception.Response.StatusDescription)" -ForegroundColor Red
+            $statusCode = $_.Exception.Response.StatusCode.value__
+            Write-Host "  Status Code: $statusCode" -ForegroundColor Red
         }
         return $null
     }
@@ -242,8 +210,6 @@ function Invoke-ApiDelete {
         [object]$Body = $null
     )
 
-    Write-Host "  [INVOKE-APIDELETE V2.2 ENTRY] URL: $Url" -ForegroundColor Cyan
-
     try {
         $headers = @{
             "Authorization" = "Bearer $Token"
@@ -252,41 +218,34 @@ function Invoke-ApiDelete {
             "X-Requested-With" = "XMLHttpRequest"
         }
 
-        # Use Invoke-WebRequest to get status code
+        # Use Invoke-WebRequest to get status code for 204 handling
         if ($Body) {
             $jsonBody = $Body | ConvertTo-Json -Depth 10
-            Write-Host "  [INVOKE-APIDELETE V2.2] Request body: $jsonBody" -ForegroundColor DarkGray
             $webResponse = Invoke-WebRequest -Uri $Url -Method Delete -Headers $headers -Body $jsonBody -UseBasicParsing
         } else {
-            Write-Host "  [INVOKE-APIDELETE V2.2] No body (empty DELETE)" -ForegroundColor DarkGray
             $webResponse = Invoke-WebRequest -Uri $Url -Method Delete -Headers $headers -UseBasicParsing
         }
 
-        # Check status code
         $statusCode = $webResponse.StatusCode
-        Write-Host "  [INVOKE-APIDELETE V2.2] HTTP Status Code: $statusCode" -ForegroundColor DarkGray
 
         # 200-299 are success codes
         if ($statusCode -ge 200 -and $statusCode -lt 300) {
             if ($webResponse.Content) {
                 $response = $webResponse.Content | ConvertFrom-Json
-                Write-Host "  [INVOKE-APIDELETE V2.2] Response type: $($response.GetType().Name)" -ForegroundColor DarkGray
                 return $response
             } else {
                 # 204 No Content or other success with no body - return success indicator
-                Write-Host "  [INVOKE-APIDELETE V2.2] Success with no content (HTTP $statusCode)" -ForegroundColor DarkGreen
                 return @{ success = $true; statusCode = $statusCode }
             }
         } else {
-            Write-Host "  [INVOKE-APIDELETE V2.2 WARNING] Unexpected status code: $statusCode" -ForegroundColor Yellow
             return $null
         }
     }
     catch {
-        Write-Host "  [INVOKE-APIDELETE V2.2 ERROR] $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "API DELETE Error ($Url): $($_.Exception.Message)" -ForegroundColor Red
         if ($_.Exception.Response) {
-            Write-Host "  [INVOKE-APIDELETE V2.2 ERROR] Status Code: $($_.Exception.Response.StatusCode.value__)" -ForegroundColor Red
-            Write-Host "  [INVOKE-APIDELETE V2.2 ERROR] Status Description: $($_.Exception.Response.StatusDescription)" -ForegroundColor Red
+            $statusCode = $_.Exception.Response.StatusCode.value__
+            Write-Host "  Status Code: $statusCode" -ForegroundColor Red
         }
         return $null
     }
@@ -368,12 +327,7 @@ function Get-DocumentsFromGroup {
         [bool]$IncludeSubgroups = $true
     )
 
-    Write-Host "  [DEBUG] *** Get-DocumentsFromGroup ENTRY ***" -ForegroundColor Magenta
-    Write-Host "  [DEBUG] GroupUniqueId parameter: '$GroupUniqueId'" -ForegroundColor Magenta
-    Write-Host "  [DEBUG] GroupUniqueId is null/empty: $([string]::IsNullOrEmpty($GroupUniqueId))" -ForegroundColor Magenta
-    Write-Host "  [DEBUG] IncludeSubgroups: $IncludeSubgroups" -ForegroundColor Magenta
-
-    Write-Host "  Fetching documents from group (Include subgroups: $IncludeSubgroups)..." -ForegroundColor Gray
+    Write-Host "  Fetching documents..." -ForegroundColor Gray
 
     if (-not $GroupUniqueId) {
         Write-Host "  Error: GroupUniqueId is required" -ForegroundColor Red
@@ -386,65 +340,26 @@ function Get-DocumentsFromGroup {
 
     do {
         $url = "$SiteURL/bff/document/api/v1/documents?Page=$page&PageSize=$pageSize&ListType=All&DocumentType=All&ProcessGroupId=$GroupUniqueId"
-        Write-Host "    [DEBUG] Calling document API: $url" -ForegroundColor Yellow
         $response = Invoke-ApiGet -Url $url -Token $Token
 
-        Write-Host "    [DEBUG] Response type: $($response.GetType().Name)" -ForegroundColor Yellow
-        if ($response) {
-            Write-Host "    [DEBUG] Response has 'items' property: $($response.PSObject.Properties.Name -contains 'items')" -ForegroundColor Yellow
-            if ($response.PSObject.Properties.Name) {
-                Write-Host "    [DEBUG] Response properties: $($response.PSObject.Properties.Name -join ', ')" -ForegroundColor Yellow
-            }
-        } else {
-            Write-Host "    [DEBUG] Response is null!" -ForegroundColor Red
-        }
-
         if ($response -and $response.items) {
-            Write-Host "    Page ${page}: Fetched $($response.items.Count) documents" -ForegroundColor Gray
-            Write-Host "    [DEBUG] Items type: $($response.items.GetType().Name)" -ForegroundColor Yellow
-            Write-Host "    [DEBUG] Items count: $($response.items.Count)" -ForegroundColor Yellow
-
-            # Debug: Show first document's properties on first page
-            if ($page -eq 1 -and $response.items.Count -gt 0) {
-                $firstDoc = $response.items[0]
-                Write-Host "    [DEBUG] First item type: $($firstDoc.GetType().Name)" -ForegroundColor Yellow
-                if ($firstDoc.PSObject.Properties.Name) {
-                    Write-Host "    [DEBUG] First item properties: $($firstDoc.PSObject.Properties.Name -join ', ')" -ForegroundColor Yellow
-                }
-                Write-Host "    [DEBUG] Sample document properties: documentId=$($firstDoc.documentId), documentName=$($firstDoc.documentName), documentUniqueId=$($firstDoc.documentUniqueId)" -ForegroundColor Yellow
-            }
-
             # If not including subgroups, filter to only documents in the target group
             if ($IncludeSubgroups) {
-                Write-Host "    [DEBUG] Including all documents (subgroups=true)" -ForegroundColor Yellow
                 $allDocuments += $response.items
             } else {
-                Write-Host "    [DEBUG] Filtering by primaryGroupUniqueId: $GroupUniqueId" -ForegroundColor Yellow
                 $groupDocuments = $response.items | Where-Object {
                     $_.primaryGroupUniqueId -eq $GroupUniqueId
                 }
                 if ($groupDocuments) {
-                    Write-Host "    Found $($groupDocuments.Count) documents in target group only" -ForegroundColor Gray
                     $allDocuments += $groupDocuments
-                } else {
-                    Write-Host "    [DEBUG] No documents matched primaryGroupUniqueId filter" -ForegroundColor Yellow
                 }
             }
-
-            Write-Host "    [DEBUG] allDocuments count after this page: $($allDocuments.Count)" -ForegroundColor Yellow
-            if ($allDocuments.Count -gt 0) {
-                Write-Host "    [DEBUG] allDocuments type: $($allDocuments.GetType().Name)" -ForegroundColor Yellow
-                Write-Host "    [DEBUG] allDocuments[0] type: $($allDocuments[0].GetType().Name)" -ForegroundColor Yellow
-            }
-        } else {
-            Write-Host "    [DEBUG] No items in response or response is null" -ForegroundColor Red
         }
 
         $page++
     } while ($response -and $response.items -and $response.items.Count -eq $pageSize)
 
-    Write-Host "  Total documents found: $($allDocuments.Count)" -ForegroundColor Green
-    Write-Host "  [DEBUG] Returning allDocuments, type: $($allDocuments.GetType().Name), count: $($allDocuments.Count)" -ForegroundColor Yellow
+    Write-Host "  Found $($allDocuments.Count) documents" -ForegroundColor Gray
     return $allDocuments
 }
 
@@ -482,29 +397,8 @@ function Invoke-ArchiveDocument {
         [int]$DocumentId
     )
 
-    Write-Host "  [ARCHIVE-DOCUMENT] Archiving document ID: $DocumentId" -ForegroundColor Magenta
     $url = "$SiteURL/bff/document/api/v1/documents/$DocumentId/archive"
-    Write-Host "  [ARCHIVE-DOCUMENT] Archive URL: $url" -ForegroundColor Magenta
-
     $response = Invoke-ApiPost -Url $url -Token $Token -Body @{}
-
-    # Check for success - could be actual response object or success indicator
-    $isSuccess = $false
-    if ($response) {
-        # Check if it's our success indicator (from 204 response)
-        if ($response.success -eq $true) {
-            $isSuccess = $true
-            Write-Host "  [ARCHIVE-DOCUMENT] Archive succeeded (HTTP $($response.statusCode))" -ForegroundColor Green
-        }
-        # Or check if it's actual response data
-        elseif ($response -is [PSCustomObject] -or $response -is [Hashtable]) {
-            $isSuccess = $true
-            Write-Host "  [ARCHIVE-DOCUMENT] Archive succeeded with response" -ForegroundColor Green
-        }
-    } else {
-        Write-Host "  [ARCHIVE-DOCUMENT] Archive failed (null response)" -ForegroundColor Red
-    }
-
     return $response
 }
 
@@ -2394,34 +2288,8 @@ function Invoke-BulkDeleteProcesses {
 
         # If deleting documents, fetch them now
         if ($deleteDocuments) {
-            Write-Host "`n  Fetching documents..." -ForegroundColor Gray
-            Write-Host "  [DEBUG] *** BEFORE calling Get-DocumentsFromGroup ***" -ForegroundColor Cyan
-            Write-Host "  [DEBUG] GroupUniqueId to pass: '$GroupUniqueId'" -ForegroundColor Cyan
-            Write-Host "  [DEBUG] IncludeSubgroups to pass: $includeSubgroups" -ForegroundColor Cyan
-
             $documents = Get-DocumentsFromGroup -SiteURL $SiteURL -Token $Token -GroupUniqueId $GroupUniqueId -IncludeSubgroups $includeSubgroups
-
-            Write-Host "  [DEBUG] *** AFTER calling Get-DocumentsFromGroup ***" -ForegroundColor Cyan
-            Write-Host "  [DEBUG] Return value type: $($documents.GetType().Name)" -ForegroundColor Cyan
-            Write-Host "  [DEBUG] Return value count/length: $($documents.Count)" -ForegroundColor Cyan
-            if ($documents -is [string]) {
-                Write-Host "  [DEBUG] WARNING: Return value is a STRING: '$documents'" -ForegroundColor Red
-            }
-
             $documentsToDelete = $documents
-            Write-Host "  Found $($documentsToDelete.Count) documents" -ForegroundColor Green
-
-            # Debug: Show first document's properties if available
-            if ($documentsToDelete.Count -gt 0) {
-                $firstDoc = $documentsToDelete[0]
-                Write-Host "  [DEBUG] First document type: $($firstDoc.GetType().Name)" -ForegroundColor Yellow
-                Write-Host "  [DEBUG] First document properties: $($firstDoc.PSObject.Properties.Name -join ', ')" -ForegroundColor Yellow
-                if ($firstDoc.documentId) {
-                    Write-Host "  [DEBUG] First document ID: $($firstDoc.documentId), Name: $($firstDoc.documentName)" -ForegroundColor Yellow
-                } else {
-                    Write-Host "  [DEBUG] WARNING: First document has no documentId property!" -ForegroundColor Red
-                }
-            }
         }
     }
 
@@ -2944,9 +2812,7 @@ function Invoke-BulkDeleteProcesses {
         foreach ($doc in $documentsToDelete) {
             # Validate document has required properties
             if (-not $doc.documentId -or $doc.documentId -eq 0) {
-                Write-Host "  [WARNING] Skipping document with invalid/missing ID" -ForegroundColor Red
-                Write-Host "    [DEBUG] Document object properties: $($doc.PSObject.Properties.Name -join ', ')" -ForegroundColor Yellow
-                Write-Host "    [DEBUG] Document object type: $($doc.GetType().Name)" -ForegroundColor Yellow
+                Write-Host "  Skipping document with invalid/missing ID" -ForegroundColor Yellow
                 $documentsSkipped += [PSCustomObject]@{
                     DocumentId = 0
                     DocumentName = "Unknown"
@@ -3070,6 +2936,7 @@ function Invoke-BulkDeleteProcesses {
     Write-Host "`nResults saved to: $outputPath" -ForegroundColor Green
     Write-Host "Total deletions: $($results.Count)" -ForegroundColor Cyan
     Write-Host "Successful: $(($results | Where-Object {$_.Status -eq 'Success'}).Count)" -ForegroundColor Green
+    Write-Host "Skipped: $(($results | Where-Object {$_.Status -eq 'Skipped'}).Count)" -ForegroundColor Yellow
     Write-Host "Failed: $(($results | Where-Object {$_.Status -eq 'Failed'}).Count)" -ForegroundColor Red
 }
 
@@ -3161,7 +3028,7 @@ Clear-Host
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  NINTEX PROCESS MANAGER BULK OPERATIONS" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  Version 2.3 (HTTP 204 Response Handling)" -ForegroundColor Yellow
+Write-Host "  Version 2.4 (Clean Output)" -ForegroundColor Yellow
 Write-Host "  Script loaded: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Yellow
 Write-Host ""
 
