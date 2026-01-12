@@ -2558,16 +2558,6 @@ function Remove-ProcessLinksFromJson {
         $linksRemoved += ($originalCount - $newCount)
     }
 
-    # Remove from LinkedStakeholders using the ProcessIds we collected
-    if ($processObj.LinkedStakeholders.LinkedStakeholder -and $processIdsToRemove.Count -gt 0) {
-        $originalCount = @($processObj.LinkedStakeholders.LinkedStakeholder).Count
-        $processObj.LinkedStakeholders.LinkedStakeholder = @($processObj.LinkedStakeholders.LinkedStakeholder | Where-Object {
-            $processIdsToRemove -notcontains $_.ProcessId
-        })
-        $newCount = @($processObj.LinkedStakeholders.LinkedStakeholder).Count
-        # Don't count these in linksRemoved as they're just stakeholder entries, not actual links
-    }
-
     # Recursively clean ChildProcessProcedures in Activities
     if ($processObj.ProcessProcedures.Activity) {
         foreach ($activity in $processObj.ProcessProcedures.Activity) {
@@ -2619,6 +2609,17 @@ function Remove-ProcessLinksFromJson {
                 $linksRemoved++
             }
         }
+    }
+
+    # Remove from LinkedStakeholders using ALL the ProcessIds we collected
+    # This must happen AFTER we've processed all link types above
+    if ($processObj.LinkedStakeholders.LinkedStakeholder -and $processIdsToRemove.Count -gt 0) {
+        $originalCount = @($processObj.LinkedStakeholders.LinkedStakeholder).Count
+        $processObj.LinkedStakeholders.LinkedStakeholder = @($processObj.LinkedStakeholders.LinkedStakeholder | Where-Object {
+            $processIdsToRemove -notcontains $_.ProcessId
+        })
+        $newCount = @($processObj.LinkedStakeholders.LinkedStakeholder).Count
+        # Don't count these in linksRemoved as they're just stakeholder entries, not actual links
     }
 
     # Convert back to JSON string
