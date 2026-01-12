@@ -2515,6 +2515,18 @@ function Get-ActiveProcessDependencies {
             $url = "$SiteURL/Api/v1/Processes/$targetUniqueId/CheckProcessDependencies?searchBehavior=15"
             $dependencies = Invoke-ApiGet -Url $url -Token $Token
 
+            # DEBUG: Show what we got back
+            Write-Host ""
+            Write-Host "  DEBUG: API URL: $url" -ForegroundColor Magenta
+            Write-Host "  DEBUG: Dependencies type: $($dependencies.GetType().FullName)" -ForegroundColor Magenta
+            Write-Host "  DEBUG: Dependencies is null: $($dependencies -eq $null)" -ForegroundColor Magenta
+            Write-Host "  DEBUG: Dependencies count: $($dependencies.Count)" -ForegroundColor Magenta
+            if ($dependencies) {
+                Write-Host "  DEBUG: Dependencies JSON:" -ForegroundColor Magenta
+                Write-Host "$(ConvertTo-Json $dependencies -Depth 5)" -ForegroundColor Magenta
+            }
+            Write-Host ""
+
             if ($dependencies -and $dependencies.Count -gt 0) {
                 foreach ($depType in $dependencies) {
                     $typeName = $depType.Type
