@@ -32,7 +32,55 @@ This script supports five distinct operation modes:
 
 Clone or download this repository to your local machine.
 
-### 2. Create Configuration File
+### 2. Fix Windows Security Warning (Recommended)
+
+When you download and run the PowerShell script for the first time, Windows may display a security warning showing "Unknown Publisher". This happens because the script is not digitally signed.
+
+**You have three options to fix this:**
+
+#### Option A: Unblock the Script (Quickest)
+
+The simplest solution is to unblock the downloaded file:
+
+```powershell
+# Right-click the script in Windows Explorer
+# Select "Properties" > Check "Unblock" > Click "OK"
+
+# OR use the provided helper:
+# Double-click Unblock-Script.bat
+# OR run in PowerShell: .\Unblock-Script.ps1
+```
+
+#### Option B: Self-Sign the Script (Recommended for Regular Use)
+
+Create a self-signed certificate and sign the script. This provides a trusted publisher on your machine:
+
+```powershell
+# Right-click Sign-Script.bat and select "Run as Administrator"
+# OR run PowerShell as Administrator, then: .\Sign-Script.ps1
+```
+
+This will:
+1. Create a self-signed code signing certificate
+2. Install it to your Trusted Root Certification Authorities
+3. Sign the Nintex-BulkOperations.ps1 script
+
+After signing, the script will show your certificate as the publisher instead of "Unknown Publisher".
+
+#### Option C: Adjust Execution Policy (Alternative)
+
+Modify PowerShell's execution policy to allow local scripts:
+
+```powershell
+# Run PowerShell as Administrator, then:
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+This allows locally created scripts to run without warnings while still requiring downloaded scripts to be signed.
+
+**Security Note:** All these methods are safe when you trust the source of the script. Review the script contents before running if you have any concerns.
+
+### 3. Create Configuration File
 
 Copy `config.template.txt` to `config.txt` and fill in your details:
 
@@ -46,7 +94,7 @@ TempGroupName=Bulk Delete Temporary Group
 
 **IMPORTANT:** Add `config.txt` to your `.gitignore` file to prevent committing credentials to version control.
 
-### 3. Prepare CSV Files (if needed)
+### 4. Prepare CSV Files (if needed)
 
 Depending on your operation, you may need CSV files with specific columns. See the Examples folder for templates.
 
@@ -288,6 +336,18 @@ The script accepts various column naming conventions:
 - `NewExpert`, `Expert`, `ExpertUsername`, `ProcessExpert`
 
 ## Troubleshooting
+
+### Windows Security Warning ("Unknown Publisher")
+
+If you see a security warning when trying to run the script:
+
+**Quick Fix:**
+- Right-click the script file, select Properties, check "Unblock", and click OK
+- OR double-click `Unblock-Script.bat`
+
+**Permanent Fix:**
+- Right-click `Sign-Script.bat` and select "Run as Administrator"
+- See the "Fix Windows Security Warning" section in Setup for detailed instructions
 
 ### Authentication Fails
 
