@@ -2427,6 +2427,54 @@ function Get-ArchivedProcessDependencies {
     return $archivedDependencies
 }
 
+function Get-AllArchivedProcesses {
+    param(
+        [string]$SiteURL,
+        [string]$Token
+    )
+
+    Write-Host "  Fetching all archived processes from site..." -ForegroundColor Gray
+
+    $allArchivedProcesses = @()
+    $page = 1
+    $pageSize = 20
+    $hasMore = $true
+
+    # Fetch all archived processes with pagination
+    while ($hasMore) {
+        try {
+            # ListType=7 is for archived processes
+            $listUrl = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$pageSize&ListType=7"
+            $response = Invoke-ApiGet -Url $listUrl -Token $Token
+
+            if ($response -and $response.items -and $response.items.Count -gt 0) {
+                Write-Host "  Page $page : Found $($response.items.Count) archived processes" -ForegroundColor Gray
+
+                # Add each process UniqueId to the list
+                foreach ($item in $response.items) {
+                    $allArchivedProcesses += $item.processUniqueId
+                }
+
+                # Check if there are more pages
+                if ($response.items.Count -lt $pageSize) {
+                    $hasMore = $false
+                } else {
+                    $page++
+                }
+            } else {
+                $hasMore = $false
+            }
+        }
+        catch {
+            Write-Host "  Error fetching archived processes: $($_.Exception.Message)" -ForegroundColor Red
+            $hasMore = $false
+        }
+    }
+
+    Write-Host "  Total archived processes found: $($allArchivedProcesses.Count)" -ForegroundColor Green
+    return $allArchivedProcesses
+}
+
 function Remove-ProcessLinksFromJson {
     param(
         [string]$ProcessJson,
@@ -2878,7 +2926,7 @@ function Invoke-BulkDeleteProcesses {
     param(
         [string]$SiteURL,
         [string]$Token,
-        [string]$SourceType,  # "CSV" or "Group"
+        [string]$SourceType,  # "CSV", "Group", or "Archived"
         [string]$CsvPath = "",
         [int]$GroupID = -1,
         [string]$GroupUniqueId = "",
@@ -2932,6 +2980,16 @@ function Invoke-BulkDeleteProcesses {
             if ($id) {
                 $processesToDelete += $id
             }
+        }
+    }
+    elseif ($SourceType -eq "Archived") {
+        # Fetch all archived processes
+        Write-Host "Fetching all archived processes from the site..." -ForegroundColor Yellow
+        $processesToDelete = Get-AllArchivedProcesses -SiteURL $SiteURL -Token $Token
+
+        if ($processesToDelete.Count -eq 0) {
+            Write-Host "No archived processes found in the site" -ForegroundColor Yellow
+            return
         }
     }
     else {  # Group-based
@@ -3881,6 +3939,21 @@ function Get-SourceType {
         return "CSV"
     }
 
+    # Mode 5 (Bulk Delete): CSV, Group, or Archived
+    if ($Mode -eq 5) {
+        Write-Host "`nSelect Source:" -ForegroundColor Yellow
+        Write-Host "  [1] CSV File" -ForegroundColor White
+        Write-Host "  [2] Process/Document Group" -ForegroundColor White
+        Write-Host "  [3] All Archived Processes" -ForegroundColor White
+        $choice = Read-Host "Choice"
+
+        switch ($choice) {
+            '2' { return "Group" }
+            '3' { return "Archived" }
+            default { return "CSV" }
+        }
+    }
+
     # Other modes: CSV or Group
     Write-Host "`nSelect Source:" -ForegroundColor Yellow
     Write-Host "  [1] CSV File" -ForegroundColor White
@@ -4062,6 +4135,13 @@ while ($running) {
                     Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -CsvPath $csvPath -TempGroupName $tempGroupName -CurrentUsername $config.Username -WhatIf
                 } else {
                     Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -CsvPath $csvPath -TempGroupName $tempGroupName -CurrentUsername $config.Username
+                }
+            } elseif ($sourceType -eq "Archived") {
+                # Handle bulk delete of all archived processes
+                if ($isDryRun) {
+                    Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -TempGroupName $tempGroupName -CurrentUsername $config.Username -WhatIf
+                } else {
+                    Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -TempGroupName $tempGroupName -CurrentUsername $config.Username
                 }
             } else {
                 $group = Select-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Group to Delete (WARNING: Destructive!)"
