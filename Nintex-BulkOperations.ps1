@@ -1,5 +1,5 @@
 # Nintex Process Manager Bulk Operations Script
-# Version 2.9 (Progress Indicators & Pre-flight Validation)
+# Version 3.0 (Dry-Run Preview Mode)
 # Supports: Archive, Restore, Update Location, Update Ownership, and Delete operations
 
 #Requires -Version 5.1
@@ -3690,6 +3690,15 @@ function Get-ObjectType {
     }
 }
 
+function Get-DryRunChoice {
+    Write-Host "`nExecution Mode:" -ForegroundColor Yellow
+    Write-Host "  [1] Execute Operation (make changes)" -ForegroundColor White
+    Write-Host "  [2] Preview/Dry-Run (no changes, show what would happen)" -ForegroundColor Cyan
+    $choice = Read-Host "Choice"
+
+    return ($choice -eq '2')
+}
+
 # ============================================================================
 # MAIN SCRIPT
 # ============================================================================
@@ -3700,7 +3709,7 @@ Clear-Host
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  NINTEX PROCESS MANAGER BULK OPERATIONS" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  Version 2.7 (Progress Counters)" -ForegroundColor Yellow
+Write-Host "  Version 3.0 (Dry-Run Preview Mode)" -ForegroundColor Yellow
 Write-Host "  Script loaded: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Yellow
 Write-Host ""
 
@@ -3728,14 +3737,23 @@ while ($running) {
         '1' {  # Bulk Archive
             $sourceType = Get-SourceType -Mode 1
             $objectType = Get-ObjectType -Mode 1
+            $isDryRun = Get-DryRunChoice
 
             if ($sourceType -eq "CSV") {
                 $csvPath = Read-Host "Enter CSV file path"
-                Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -CsvPath $csvPath
+                if ($isDryRun) {
+                    Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -CsvPath $csvPath -WhatIf
+                } else {
+                    Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -CsvPath $csvPath
+                }
             } else {
                 $group = Select-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Group to Archive"
                 if ($group) {
-                    Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -GroupID $group.id -GroupUniqueId $group.uniqueId
+                    if ($isDryRun) {
+                        Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -GroupID $group.id -GroupUniqueId $group.uniqueId -WhatIf
+                    } else {
+                        Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -GroupID $group.id -GroupUniqueId $group.uniqueId
+                    }
                 }
             }
         }
@@ -3743,6 +3761,7 @@ while ($running) {
         '2' {  # Bulk Restore
             $sourceType = Get-SourceType -Mode 2
             $objectType = Get-ObjectType -Mode 2
+            $isDryRun = Get-DryRunChoice
 
             # Get restore target group
             $restoreGroupId = -1
@@ -3763,9 +3782,17 @@ while ($running) {
             if ($restoreGroupId -gt 0) {
                 if ($sourceType -eq "CSV") {
                     $csvPath = Read-Host "Enter CSV file path"
-                    Invoke-BulkRestore -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -CsvPath $csvPath -RestoreGroupID $restoreGroupId
+                    if ($isDryRun) {
+                        Invoke-BulkRestore -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -CsvPath $csvPath -RestoreGroupID $restoreGroupId -WhatIf
+                    } else {
+                        Invoke-BulkRestore -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -CsvPath $csvPath -RestoreGroupID $restoreGroupId
+                    }
                 } else {
-                    Invoke-BulkRestore -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -RestoreGroupID $restoreGroupId
+                    if ($isDryRun) {
+                        Invoke-BulkRestore -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -RestoreGroupID $restoreGroupId -WhatIf
+                    } else {
+                        Invoke-BulkRestore -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -RestoreGroupID $restoreGroupId
+                    }
                 }
             }
         }
@@ -3773,16 +3800,27 @@ while ($running) {
         '3' {  # Bulk Update Location
             $objectType = Get-ObjectType -Mode 3
             $csvPath = Read-Host "Enter CSV file path (must contain ID and NewGroupID columns)"
-            Invoke-BulkUpdateLocation -SiteURL $config.SiteURL -Token $token -ObjectType $objectType -CsvPath $csvPath
+            $isDryRun = Get-DryRunChoice
+            if ($isDryRun) {
+                Invoke-BulkUpdateLocation -SiteURL $config.SiteURL -Token $token -ObjectType $objectType -CsvPath $csvPath -WhatIf
+            } else {
+                Invoke-BulkUpdateLocation -SiteURL $config.SiteURL -Token $token -ObjectType $objectType -CsvPath $csvPath
+            }
         }
 
         '4' {  # Bulk Update Ownership
             $csvPath = Read-Host "Enter CSV file path (must contain ProcessID, NewOwner, NewExpert columns)"
-            Invoke-BulkUpdateOwnership -SiteURL $config.SiteURL -Token $token -CsvPath $csvPath
+            $isDryRun = Get-DryRunChoice
+            if ($isDryRun) {
+                Invoke-BulkUpdateOwnership -SiteURL $config.SiteURL -Token $token -CsvPath $csvPath -WhatIf
+            } else {
+                Invoke-BulkUpdateOwnership -SiteURL $config.SiteURL -Token $token -CsvPath $csvPath
+            }
         }
 
         '5' {  # Bulk Delete Content
             $sourceType = Get-SourceType -Mode 5
+            $isDryRun = Get-DryRunChoice
 
             $tempGroupName = $config.TempGroupName
             if (-not $tempGroupName) {
@@ -3791,11 +3829,19 @@ while ($running) {
 
             if ($sourceType -eq "CSV") {
                 $csvPath = Read-Host "Enter CSV file path"
-                Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -CsvPath $csvPath -TempGroupName $tempGroupName -CurrentUsername $config.Username
+                if ($isDryRun) {
+                    Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -CsvPath $csvPath -TempGroupName $tempGroupName -CurrentUsername $config.Username -WhatIf
+                } else {
+                    Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -CsvPath $csvPath -TempGroupName $tempGroupName -CurrentUsername $config.Username
+                }
             } else {
                 $group = Select-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Group to Delete (WARNING: Destructive!)"
                 if ($group) {
-                    Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -GroupID $group.id -GroupUniqueId $group.uniqueId -TempGroupName $tempGroupName -CurrentUsername $config.Username
+                    if ($isDryRun) {
+                        Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -GroupID $group.id -GroupUniqueId $group.uniqueId -TempGroupName $tempGroupName -CurrentUsername $config.Username -WhatIf
+                    } else {
+                        Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -GroupID $group.id -GroupUniqueId $group.uniqueId -TempGroupName $tempGroupName -CurrentUsername $config.Username
+                    }
                 }
             }
         }
