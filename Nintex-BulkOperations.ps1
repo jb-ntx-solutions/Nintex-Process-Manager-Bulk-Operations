@@ -2472,10 +2472,10 @@ function Get-ActiveProcessDependencies {
     $hasMore = $true
 
     # Step 1: Fetch all active processes with pagination
-    # ListType=1 is for active processes (ListType=7 is archived)
+    # ListType=0 is for all active processes (ListType=7 is archived)
     while ($hasMore) {
         try {
-            $listUrl = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$pageSize&ListType=1"
+            $listUrl = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$pageSize&ListType=0"
             $response = Invoke-ApiGet -Url $listUrl -Token $Token
 
             if ($response -and $response.items -and $response.items.Count -gt 0) {
