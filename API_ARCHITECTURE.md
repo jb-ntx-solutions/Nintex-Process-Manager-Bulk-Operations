@@ -238,7 +238,7 @@ When removing process dependencies, Nintex Process Manager handles different lin
 
 ## Dependency Checking APIs
 
-### Check Process Dependencies (Outgoing)
+### Check Process Dependencies (INCOMING - Active Processes Only)
 
 **Endpoint:** `/Api/v1/Processes/{processUniqueId}/CheckProcessDependencies`
 
@@ -252,18 +252,45 @@ $url = "$SiteURL/Api/v1/Processes/$processUniqueId/CheckProcessDependencies?sear
 $dependencies = Invoke-ApiGet -Url $url -Token $Token
 ```
 
-**Returns:** What resources/processes the target process **depends on** (outgoing dependencies)
+**Returns:** What **ACTIVE** processes reference the target process (incoming dependencies)
 
-**Limitation:** Only returns what the process references, NOT what other processes reference it!
+**Response Example:**
+```json
+[
+    {
+        "Type": "Linked Process",
+        "Dependencies": [
+            {
+                "Name": "Process A",
+                "UniqueId": "guid-1"
+            },
+            {
+                "Name": "Process B",
+                "UniqueId": "guid-2"
+            }
+        ]
+    }
+]
+```
 
-### Check Incoming Dependencies
+**IMPORTANT Notes:**
+- ✅ Returns **INCOMING** dependencies (processes that reference the target)
+- ✅ Only returns **ACTIVE** processes (not archived)
+- ✅ This is the FAST way to find active process dependencies
+- ❌ Does NOT return archived processes - those must be checked manually
 
-**No Direct API:** There is no single API endpoint to check what other processes reference a target process.
+**Performance:**
+- **Fast:** 1 API call per target process
+- **Alternative (slow):** Fetching all active processes individually would be 700+ API calls
 
-**Solution:** Must manually search through all processes:
+### Check Incoming Dependencies (Archived Processes)
 
-1. For **active processes**: Fetch each individually using `/Api/v1/Processes/{processUniqueId}`
-2. For **archived processes**: Batch fetch using `/mobile/api/v1/processes`
+**No Direct API:** The CheckProcessDependencies API only returns active processes.
+
+**Solution:** Must manually search through all archived processes:
+
+1. Fetch list of archived processes: `/Bff/Process/api/v1/processes?ListType=7`
+2. Batch fetch details using mobile API: `/mobile/api/v1/processes`
 3. Search the JSON for references to target process UniqueId
 
 **Code Example:**
@@ -330,9 +357,34 @@ function Find-ProcessLinksInJson {
 
 ## Common Patterns
 
-### Pattern 1: Scan All Active Processes for Dependencies
+### Pattern 1: Find Active Processes That Reference a Target Process (FAST)
+
+**Use Case:** Finding which active processes have links to a process you want to delete
 
 ```powershell
+# FAST: Use CheckProcessDependencies API
+$url = "$SiteURL/Api/v1/Processes/$targetProcessUniqueId/CheckProcessDependencies?searchBehavior=15"
+$dependencies = Invoke-ApiGet -Url $url -Token $Token
+
+# Parse the response
+foreach ($depType in $dependencies) {
+    if ($depType.Type -eq "Linked Process") {
+        foreach ($dep in $depType.Dependencies) {
+            Write-Host "Found: $($dep.Name) references this process"
+            # $dep.UniqueId contains the process that has the reference
+        }
+    }
+}
+```
+
+**Performance:** 1 API call per target process (vs 700+ calls if scanning all processes)
+
+### Pattern 1 (Alternative - SLOW - Don't Use)
+
+**DEPRECATED:** This approach is very slow and should not be used for active processes.
+
+```powershell
+# SLOW - DON'T USE THIS FOR ACTIVE PROCESSES
 # Step 1: Get list of all active processes (paginated)
 $listUrl = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=20&ListType=0"
 $response = Invoke-ApiGet -Url $listUrl -Token $Token
@@ -344,6 +396,8 @@ foreach ($item in $response.items) {
     # Search processData.processJson for references
 }
 ```
+
+**Why this is slow:** With 700 active processes, this makes 700+ individual API calls. Use CheckProcessDependencies instead!
 
 ### Pattern 2: Scan All Archived Processes for Dependencies
 

@@ -2496,104 +2496,59 @@ function Get-ActiveProcessDependencies {
     )
 
     $activeDependencies = @()
-    $page = 1
-    $pageSize = 20
-    $hasMore = $true
-    $totalProcessesChecked = 0
+    $totalChecked = 0
+    $totalTargets = $ProcessDeleteMap.Keys.Count
 
-    # Step 1: Fetch all active processes with pagination
-    # ListType=0 is for all active processes (ListType=7 is archived)
-    while ($hasMore) {
+    # Use the CheckProcessDependencies API to find incoming dependencies
+    # This is MUCH faster than scanning all active processes manually
+    # searchBehavior=15 returns processes that reference the target (incoming dependencies)
+    foreach ($processKey in $ProcessDeleteMap.Keys) {
+        $totalChecked++
+        $processInfo = $ProcessDeleteMap[$processKey]
+        $targetUniqueId = $processInfo.UniqueId
+
+        # Update progress indicator
+        Write-Host "`r  Checking dependencies for target process $totalChecked of $totalTargets..." -NoNewline -ForegroundColor Gray
+
         try {
-            $listUrl = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$pageSize&ListType=0"
-            $response = Invoke-ApiGet -Url $listUrl -Token $Token
+            # Call the CheckProcessDependencies API
+            $url = "$SiteURL/Api/v1/Processes/$targetUniqueId/CheckProcessDependencies?searchBehavior=15"
+            $dependencies = Invoke-ApiGet -Url $url -Token $Token
 
-            if ($response -and $response.items -and $response.items.Count -gt 0) {
-                # Update progress indicator (single line)
-                Write-Host "`r  Scanning active processes... Page $page ($($response.items.Count) processes)" -NoNewline -ForegroundColor Gray
+            if ($dependencies -and $dependencies.Count -gt 0) {
+                foreach ($depType in $dependencies) {
+                    $typeName = $depType.Type
 
-                # Collect UniqueIds for fetching (excluding processes being deleted)
-                $uniqueIds = $response.items | ForEach-Object {
-                    $procUniqueId = $_.processUniqueId
-                    # Skip processes that are being deleted
-                    $isBeingDeleted = $false
-                    foreach ($processKey in $ProcessDeleteMap.Keys) {
-                        if ($ProcessDeleteMap[$processKey].UniqueId -eq $procUniqueId) {
-                            $isBeingDeleted = $true
-                            break
-                        }
-                    }
-                    if (-not $isBeingDeleted) {
-                        $procUniqueId
-                    }
-                }
+                    # Only process "Linked Process" dependencies (active processes that reference this one)
+                    if ($typeName -eq "Linked Process") {
+                        foreach ($dep in $depType.Dependencies) {
+                            $depUniqueId = $dep.UniqueId
+                            $depName = $dep.Name
 
-                if ($uniqueIds -and $uniqueIds.Count -gt 0) {
-                    # Step 2: Fetch active process details individually using the correct API
-                    # NOTE: For ACTIVE processes, use /Api/v1/Processes/{processUniqueId}
-                    #       The mobile API is only for ARCHIVED processes
-                    foreach ($uniqueId in $uniqueIds) {
-                        $totalProcessesChecked++
+                            # Show on new line when dependency found
+                            Write-Host ""
+                            Write-Host "    Found: $depName has link to process $targetUniqueId" -ForegroundColor Yellow
 
-                        try {
-                            # Use the standard API for active processes (not mobile API)
-                            $processUrl = "$SiteURL/Api/v1/Processes/$uniqueId"
-                            $processResponse = Invoke-ApiGet -Url $processUrl -Token $Token
-
-                            if ($processResponse -and $processResponse.processJson) {
-                                $activeUniqueId = $processResponse.processJson.UniqueId
-                                $activeName = $processResponse.processJson.Name
-                                $activeProcessJson = $processResponse.processJson | ConvertTo-Json -Depth 20 -Compress
-
-                                # Check if this active process has links to any process being deleted
-                                foreach ($processKey in $ProcessDeleteMap.Keys) {
-                                    $processInfo = $ProcessDeleteMap[$processKey]
-                                    $targetUniqueId = $processInfo.UniqueId
-
-                                    if (Find-ProcessLinksInJson -ProcessJson $activeProcessJson -TargetProcessUniqueId $targetUniqueId) {
-                                        # Show on new line when dependency found
-                                        Write-Host ""
-                                        Write-Host "    Found: $activeName has link to process $targetUniqueId" -ForegroundColor Yellow
-
-                                        # Add to dependencies list
-                                        $activeDependencies += @{
-                                            Type = "Linked Process"
-                                            UniqueId = $activeUniqueId
-                                            Name = $activeName
-                                            ReferencedProcessKey = $processKey
-                                            IsArchived = $false
-                                        }
-
-                                        # Resume progress indicator
-                                        Write-Host "`r  Scanning active processes... Page $page ($totalProcessesChecked processes checked)" -NoNewline -ForegroundColor Gray
-                                    }
-                                }
+                            # Add to dependencies list
+                            $activeDependencies += @{
+                                Type = "Linked Process"
+                                UniqueId = $depUniqueId
+                                Name = $depName
+                                ReferencedProcessKey = $processKey
+                                IsArchived = $false
                             }
-                        }
-                        catch {
-                            # Silently continue on individual process errors to avoid cluttering output
-                            # Errors are typically due to permissions or deleted processes
-                        }
 
-                        # Small delay to avoid rate limiting
-                        Start-Sleep -Milliseconds 100
+                            # Resume progress indicator
+                            Write-Host "`r  Checking dependencies for target process $totalChecked of $totalTargets..." -NoNewline -ForegroundColor Gray
+                        }
                     }
                 }
-
-                # Check if there are more pages
-                if ($response.items.Count -lt $pageSize) {
-                    $hasMore = $false
-                } else {
-                    $page++
-                }
-            } else {
-                $hasMore = $false
             }
         }
         catch {
             Write-Host ""  # New line before error
-            Write-Host "  Warning: Failed to fetch active processes page $page : $($_.Exception.Message)" -ForegroundColor Yellow
-            $hasMore = $false
+            Write-Host "  Warning: Failed to check dependencies for process $targetUniqueId : $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "`r  Checking dependencies for target process $totalChecked of $totalTargets..." -NoNewline -ForegroundColor Gray
         }
     }
 
