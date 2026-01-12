@@ -658,34 +658,32 @@ function Get-ProcessGroupById {
         if ($isGuid) {
             Write-Host "Looking up group by GUID: $GroupId" -ForegroundColor Gray
 
-            # Use breadcrumb API to verify the group exists and get its details
-            # This is much faster than fetching the entire tree
-            $url = "$SiteURL/bff/navigation/api/v1/breadcrumb/children?type=ProcessGroup&id=$GroupId"
-            $response = Invoke-ApiGet -Url $url -Token $Token
+            # Try direct API endpoint first (most reliable)
+            $directUrl = "$SiteURL/Api/v1/ProcessGroups/$GroupId"
+            $directResponse = Invoke-ApiGet -Url $directUrl -Token $Token
 
-            if ($response) {
-                # The breadcrumb API validates the group exists
-                # Now we need to get the group's name and numeric ID
-                # We can get the name from the breadcrumb itself
-                $breadcrumbUrl = "$SiteURL/bff/navigation/api/v1/breadcrumb?type=ProcessGroup&id=$GroupId"
-                $breadcrumbResponse = Invoke-ApiGet -Url $breadcrumbUrl -Token $Token
+            if ($directResponse -and $directResponse.processGroupJson) {
+                $groupJson = $directResponse.processGroupJson
+                Write-Host "Found group: $($groupJson.Name)" -ForegroundColor Green
 
-                if ($breadcrumbResponse -and $breadcrumbResponse.breadcrumb) {
-                    # Find the target group in the breadcrumb trail (it's the last item)
-                    $targetGroup = $breadcrumbResponse.breadcrumb | Where-Object { $_.id -eq $GroupId } | Select-Object -Last 1
+                return @{
+                    id = $groupJson.Id
+                    uniqueId = $groupJson.UniqueId
+                    name = $groupJson.Name
+                }
+            }
 
-                    if ($targetGroup) {
-                        # Get numeric ID from root groups (fast lookup)
-                        $numericId = Get-GroupNumericIdFromTree -SiteURL $SiteURL -Token $Token -TargetUniqueId $GroupId
+            # Fallback: Search the tree for the group
+            Write-Host "  Direct API lookup failed, searching group tree..." -ForegroundColor Gray
+            $numericId = Get-GroupNumericIdFromTree -SiteURL $SiteURL -Token $Token -TargetUniqueId $GroupId
 
-                        Write-Host "Found group: $($targetGroup.name)" -ForegroundColor Green
+            if ($numericId -and $numericId -ne -1) {
+                # We found the numeric ID, now get the full group details from the tree
+                $group = Find-GroupInTreeByNumericId -SiteURL $SiteURL -Token $Token -TargetNumericId $numericId
 
-                        return @{
-                            id = $numericId
-                            uniqueId = $GroupId
-                            name = $targetGroup.name
-                        }
-                    }
+                if ($group) {
+                    Write-Host "Found group: $($group.name)" -ForegroundColor Green
+                    return $group
                 }
             }
 
