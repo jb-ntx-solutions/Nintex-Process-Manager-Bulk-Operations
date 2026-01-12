@@ -3249,19 +3249,29 @@ function Invoke-BulkDeleteProcesses {
         }
     }
 
-    # Step 3: Create temporary group for restoring archived dependencies
-    Write-Host "`n=== PHASE 3: Creating Temporary Group ===" -ForegroundColor Cyan
+    # Step 3: Create temporary group for restoring archived dependencies (only if needed)
+    $tempGroupCreated = $false
+    $tempGroupId = $null
+    $tempGroupUniqueId = $null
 
-    $tempGroup = New-ProcessGroup -SiteURL $SiteURL -Token $Token -GroupName $TempGroupName
+    if ($archivedCount -gt 0) {
+        Write-Host "`n=== PHASE 3: Creating Temporary Group ===" -ForegroundColor Cyan
 
-    if (-not $tempGroup -or -not $tempGroup.id -or $tempGroup.id -lt 0) {
-        Write-Host "Failed to create temporary group. Operation cancelled." -ForegroundColor Red
-        return
+        $tempGroup = New-ProcessGroup -SiteURL $SiteURL -Token $Token -GroupName $TempGroupName
+
+        if (-not $tempGroup -or -not $tempGroup.id -or $tempGroup.id -lt 0) {
+            Write-Host "Failed to create temporary group. Operation cancelled." -ForegroundColor Red
+            return
+        }
+
+        $tempGroupId = $tempGroup.id
+        $tempGroupUniqueId = $tempGroup.uniqueId
+        $tempGroupCreated = $true
+        Write-Host "Temporary group created (ID: $tempGroupId, uniqueId: $tempGroupUniqueId)" -ForegroundColor Green
+    } else {
+        Write-Host "`n=== PHASE 3: Creating Temporary Group ===" -ForegroundColor Cyan
+        Write-Host "No archived dependencies found - skipping temporary group creation" -ForegroundColor Green
     }
-
-    $tempGroupId = $tempGroup.id
-    $tempGroupUniqueId = $tempGroup.uniqueId
-    Write-Host "Temporary group created (ID: $tempGroupId, uniqueId: $tempGroupUniqueId)" -ForegroundColor Green
 
     # Step 4: Check status of each dependency and restore if needed
     Write-Host "`n=== PHASE 4: Checking Dependency Status and Restoring Archived Dependencies ===" -ForegroundColor Cyan
@@ -3736,7 +3746,7 @@ function Invoke-BulkDeleteProcesses {
     }
 
     # Step 9: Clean up temp group (if it was created)
-    if ($processesToDelete.Count -gt 0) {
+    if ($tempGroupCreated -and $processesToDelete.Count -gt 0) {
         Write-Host "`n=== PHASE 9: Cleanup ===" -ForegroundColor Cyan
         Write-Host "Deleting temporary group (ID: $tempGroupId, UniqueId: $tempGroupUniqueId)..." -ForegroundColor White
 
