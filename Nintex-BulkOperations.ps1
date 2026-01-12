@@ -1007,6 +1007,87 @@ function Delete-ProcessGroup {
     }
 }
 
+function Get-GroupsInTree {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$RootGroupUniqueId,
+        [int]$RootGroupId = -1,
+        [switch]$IncludeRoot = $true
+    )
+
+    # Get all groups in the site
+    $allGroups = Get-ProcessGroups -SiteURL $SiteURL -Token $Token
+    if (-not $allGroups) {
+        Write-Host "Warning: Could not retrieve process groups" -ForegroundColor Yellow
+        return @()
+    }
+
+    # Find the root group
+    $rootGroup = $null
+    if ($RootGroupUniqueId) {
+        $rootGroup = $allGroups | Where-Object { $_.uniqueId -eq $RootGroupUniqueId } | Select-Object -First 1
+    } elseif ($RootGroupId -gt 0) {
+        $rootGroup = $allGroups | Where-Object { $_.id -eq $RootGroupId } | Select-Object -First 1
+    }
+
+    if (-not $rootGroup) {
+        Write-Host "Warning: Could not find root group" -ForegroundColor Yellow
+        return @()
+    }
+
+    # Recursive function to get all descendant groups with their depth
+    function Get-DescendantGroups {
+        param(
+            [object]$ParentGroup,
+            [array]$AllGroups,
+            [int]$Depth = 0
+        )
+
+        $results = @()
+
+        # Get direct children of this group
+        $children = $AllGroups | Where-Object { $_.parentId -eq $ParentGroup.id }
+
+        foreach ($child in $children) {
+            # Add this child with its depth
+            $results += [PSCustomObject]@{
+                Group = $child
+                Depth = $Depth
+                UniqueId = $child.uniqueId
+                Name = $child.name
+                Id = $child.id
+            }
+
+            # Recursively get this child's descendants
+            $childDescendants = Get-DescendantGroups -ParentGroup $child -AllGroups $AllGroups -Depth ($Depth + 1)
+            $results += $childDescendants
+        }
+
+        return $results
+    }
+
+    # Get all descendants
+    $groupsInTree = Get-DescendantGroups -ParentGroup $rootGroup -AllGroups $allGroups -Depth 1
+
+    # Include root group if requested
+    if ($IncludeRoot) {
+        $rootGroupInfo = [PSCustomObject]@{
+            Group = $rootGroup
+            Depth = 0
+            UniqueId = $rootGroup.uniqueId
+            Name = $rootGroup.name
+            Id = $rootGroup.id
+        }
+        $groupsInTree = @($rootGroupInfo) + $groupsInTree
+    }
+
+    # Sort by depth descending (deepest first) so we delete children before parents
+    $groupsInTree = $groupsInTree | Sort-Object -Property Depth -Descending
+
+    return $groupsInTree
+}
+
 function Show-GroupTree {
     param(
         [array]$Groups,
@@ -2939,6 +3020,33 @@ function Invoke-BulkDeleteProcesses {
             }
         }
 
+        # Preview: Show groups that could be deleted (if Group source type)
+        if ($SourceType -eq "Group" -and $GroupUniqueId) {
+            Write-Host ""
+            Write-Host "=== OPTIONAL GROUP DELETION ===" -ForegroundColor Yellow
+            Write-Host "If you choose to delete group folders after process/document deletion:" -ForegroundColor Cyan
+
+            $groupsToDelete = Get-GroupsInTree -SiteURL $SiteURL -Token $Token -RootGroupUniqueId $GroupUniqueId -IncludeRoot
+
+            if ($groupsToDelete.Count -gt 0) {
+                Write-Host "The following $($groupsToDelete.Count) group(s) would be deleted (bottom to top):" -ForegroundColor Cyan
+                foreach ($grp in $groupsToDelete) {
+                    $indent = "  " * $grp.Depth
+                    Write-Host "$indent- $($grp.Name) (Depth: $($grp.Depth))" -ForegroundColor Gray
+
+                    $results += [PSCustomObject]@{
+                        ObjectType = "ProcessGroup (Optional)"
+                        ObjectID = $grp.UniqueId
+                        ProcessUniqueId = ""
+                        GroupUniqueId = $grp.UniqueId
+                        Operation = "Delete"
+                        Status = "Preview"
+                        Message = "Would be deleted if group cleanup is selected (Depth: $($grp.Depth), Name: $($grp.Name))"
+                    }
+                }
+            }
+        }
+
         # Save preview results
         $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
         $outputPath = "Delete_Preview_$timestamp.csv"
@@ -2955,6 +3063,9 @@ function Invoke-BulkDeleteProcesses {
         Write-Host "  - Archiving all processes" -ForegroundColor Gray
         Write-Host "  - Permanent deletion" -ForegroundColor Gray
         Write-Host "  - Cleanup of temporary groups" -ForegroundColor Gray
+        if ($SourceType -eq "Group") {
+            Write-Host "  - Optional: Delete process group folders (you will be prompted)" -ForegroundColor Gray
+        }
         Write-Host ""
         Write-Host "*** This was a PREVIEW - no changes were made ***" -ForegroundColor Yellow
         return
@@ -3597,6 +3708,74 @@ function Invoke-BulkDeleteProcesses {
 
         if (-not $deleteSuccess) {
             Write-Host "  Warning: Failed to delete temporary group. You may need to delete it manually." -ForegroundColor Yellow
+        }
+    }
+
+    # Optional: Delete the source group folders (only for Group source type)
+    if ($SourceType -eq "Group" -and $GroupUniqueId) {
+        Write-Host "`n=== OPTIONAL: Process Group Cleanup ===" -ForegroundColor Cyan
+        Write-Host "All processes and documents have been deleted from the selected group." -ForegroundColor White
+        Write-Host ""
+        $deleteGroups = Read-Host "Do you also want to delete the process group folders themselves? (Y/N)"
+
+        if ($deleteGroups -eq 'Y' -or $deleteGroups -eq 'y') {
+            Write-Host "`nRetrieving group hierarchy..." -ForegroundColor Cyan
+
+            # Get all groups in the tree (sorted by depth, deepest first)
+            $groupsToDelete = Get-GroupsInTree -SiteURL $SiteURL -Token $Token -RootGroupUniqueId $GroupUniqueId -IncludeRoot
+
+            if ($groupsToDelete.Count -gt 0) {
+                Write-Host "Found $($groupsToDelete.Count) group(s) to delete:" -ForegroundColor Yellow
+                foreach ($grp in $groupsToDelete) {
+                    $indent = "  " * $grp.Depth
+                    Write-Host "$indent- $($grp.Name) (Depth: $($grp.Depth))" -ForegroundColor Gray
+                }
+
+                Write-Host "`nDeleting groups from bottom to top (children before parents)..." -ForegroundColor Cyan
+                $groupDeleteCount = 0
+                $groupDeleteFailCount = 0
+
+                foreach ($grp in $groupsToDelete) {
+                    Write-Host "  Deleting group: $($grp.Name) (Depth: $($grp.Depth))..." -ForegroundColor Gray
+
+                    $deleteSuccess = Delete-ProcessGroup -SiteURL $SiteURL -Token $Token -GroupUniqueId $grp.UniqueId
+
+                    if ($deleteSuccess) {
+                        $groupDeleteCount++
+                        $results += [PSCustomObject]@{
+                            ObjectType = "ProcessGroup"
+                            ObjectID = $grp.UniqueId
+                            Name = $grp.Name
+                            Operation = "Delete"
+                            Status = "Success"
+                            Message = "Group deleted (Depth: $($grp.Depth))"
+                        }
+                    } else {
+                        $groupDeleteFailCount++
+                        $results += [PSCustomObject]@{
+                            ObjectType = "ProcessGroup"
+                            ObjectID = $grp.UniqueId
+                            Name = $grp.Name
+                            Operation = "Delete"
+                            Status = "Failed"
+                            Message = "Failed to delete group (Depth: $($grp.Depth))"
+                        }
+                    }
+                }
+
+                Write-Host "`nGroup deletion complete:" -ForegroundColor Green
+                Write-Host "  Successfully deleted: $groupDeleteCount" -ForegroundColor Green
+                Write-Host "  Failed: $groupDeleteFailCount" -ForegroundColor Red
+
+                if ($groupDeleteFailCount -gt 0) {
+                    Write-Host "`nNote: Some groups may have failed to delete if they still contain content" -ForegroundColor Yellow
+                    Write-Host "or if there were permissions issues. Check the results CSV for details." -ForegroundColor Yellow
+                }
+            } else {
+                Write-Host "No groups found to delete." -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "Skipping group folder deletion." -ForegroundColor Yellow
         }
     }
 
