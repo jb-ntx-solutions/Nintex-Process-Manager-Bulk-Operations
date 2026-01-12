@@ -1232,8 +1232,12 @@ function Invoke-BulkArchive {
     if ($processesToArchive.Count -gt 0) {
         Write-Host "`nArchiving $($processesToArchive.Count) processes..." -ForegroundColor Cyan
 
+        $currentIndex = 0
+        $totalProcesses = $processesToArchive.Count
+
         foreach ($processId in $processesToArchive) {
-            Write-Host "Archiving Process ID: $processId" -ForegroundColor White
+            $currentIndex++
+            Write-Host "`r  Archiving Process $currentIndex of $totalProcesses..." -NoNewline -ForegroundColor Gray
 
             # Fetch process details to get uniqueId
             $verifyUrl = "$SiteURL/Api/v1/Processes/$processId"
@@ -1249,7 +1253,6 @@ function Invoke-BulkArchive {
                     # Verify archive
                     $process = Invoke-ApiGet -Url $verifyUrl -Token $Token
                     if ($process -and $process.isArchived) {
-                        Write-Host "  Success: Process archived" -ForegroundColor Green
                         $results += [PSCustomObject]@{
                             ObjectType = "Process"
                             ObjectID = $processId
@@ -1258,7 +1261,6 @@ function Invoke-BulkArchive {
                             Message = "Archived successfully"
                         }
                     } else {
-                        Write-Host "  Failed: Could not archive process" -ForegroundColor Red
                         $results += [PSCustomObject]@{
                             ObjectType = "Process"
                             ObjectID = $processId
@@ -1277,7 +1279,6 @@ function Invoke-BulkArchive {
                     }
                 }
             } else {
-                Write-Host "  Failed: Could not retrieve process details" -ForegroundColor Red
                 $results += [PSCustomObject]@{
                     ObjectType = "Process"
                     ObjectID = $processId
@@ -1287,6 +1288,7 @@ function Invoke-BulkArchive {
                 }
             }
         }
+        Write-Host ""  # New line after progress counter
     }
 
     # Archive documents (if applicable)
@@ -1294,8 +1296,12 @@ function Invoke-BulkArchive {
         Write-Host "`nArchiving $($documentsToArchive.Count) documents..." -ForegroundColor Cyan
         Write-Host "Note: Document archiving may not be supported in all Nintex PM versions" -ForegroundColor Yellow
 
+        $currentIndex = 0
+        $totalDocuments = $documentsToArchive.Count
+
         foreach ($docId in $documentsToArchive) {
-            Write-Host "Archiving Document ID: $docId" -ForegroundColor White
+            $currentIndex++
+            Write-Host "`r  Archiving Document $currentIndex of $totalDocuments..." -NoNewline -ForegroundColor Gray
 
             # Adjust endpoint based on your version
             $archiveUrl = "$SiteURL/Api/v1/Documents/$docId/Archive"
@@ -1319,6 +1325,7 @@ function Invoke-BulkArchive {
                 }
             }
         }
+        Write-Host ""  # New line after progress counter
     }
 
     # Save results
@@ -1387,8 +1394,12 @@ function Invoke-BulkRestore {
     if ($processesToRestore.Count -gt 0) {
         Write-Host "`nRestoring $($processesToRestore.Count) processes to Group ID: $RestoreGroupID..." -ForegroundColor Cyan
 
+        $currentIndex = 0
+        $totalProcesses = $processesToRestore.Count
+
         foreach ($processId in $processesToRestore) {
-            Write-Host "Restoring Process ID: $processId" -ForegroundColor White
+            $currentIndex++
+            Write-Host "`r  Restoring Process $currentIndex of $totalProcesses..." -NoNewline -ForegroundColor Gray
 
             $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess"
             $restoreBody = @{
@@ -1403,7 +1414,6 @@ function Invoke-BulkRestore {
                 $process = Invoke-ApiGet -Url $verifyUrl -Token $Token
 
                 if ($process -and -not $process.isArchived) {
-                    Write-Host "  Success: Process restored" -ForegroundColor Green
                     $results += [PSCustomObject]@{
                         ObjectType = "Process"
                         ObjectID = $processId
@@ -1413,7 +1423,6 @@ function Invoke-BulkRestore {
                         ActionUrl = "$SiteURL/Process/View/$processId"
                     }
                 } else {
-                    Write-Host "  Failed: Process may still be archived" -ForegroundColor Red
                     $results += [PSCustomObject]@{
                         ObjectType = "Process"
                         ObjectID = $processId
@@ -1434,6 +1443,7 @@ function Invoke-BulkRestore {
                 }
             }
         }
+        Write-Host ""  # New line after progress counter
     }
 
     # Restore documents
@@ -1484,18 +1494,31 @@ function Invoke-BulkUpdateLocation {
     if (-not $csv) { return }
 
     $results = @()
+    $currentIndex = 0
+    $totalRows = $csv.Count
+
+    Write-Host "`nProcessing $totalRows rows..." -ForegroundColor Cyan
 
     foreach ($row in $csv) {
+        $currentIndex++
+        Write-Host "`r  Processing row $currentIndex of $totalRows..." -NoNewline -ForegroundColor Gray
+
         $objectId = Get-IdFromCsvRow -Row $row
         $newGroupId = Get-NewGroupIdFromCsvRow -Row $row
 
         if (-not $objectId -or -not $newGroupId) {
-            Write-Host "Skipping row - missing ID or NewGroupID" -ForegroundColor Yellow
+            $results += [PSCustomObject]@{
+                ObjectType = "Unknown"
+                ObjectID = "N/A"
+                Operation = "UpdateLocation"
+                Status = "Skipped"
+                Message = "Missing ID or NewGroupID"
+                ActionUrl = ""
+            }
             continue
         }
 
         if ($ObjectType -eq "Processes" -or $ObjectType -eq "Both") {
-            Write-Host "Moving Process $objectId to Group $newGroupId" -ForegroundColor White
 
             # Get current process
             $getUrl = "$SiteURL/Api/v1/Processes/$objectId"
@@ -1509,7 +1532,6 @@ function Invoke-BulkUpdateLocation {
                 $updateResult = Invoke-ApiPut -Url $updateUrl -Token $Token -Body $process
 
                 if ($updateResult -and $updateResult.Success) {
-                    Write-Host "  Success: Process moved" -ForegroundColor Green
                     $results += [PSCustomObject]@{
                         ObjectType = "Process"
                         ObjectID = $objectId
@@ -1519,7 +1541,6 @@ function Invoke-BulkUpdateLocation {
                         ActionUrl = "$SiteURL/Process/View/$objectId"
                     }
                 } else {
-                    Write-Host "  Failed: Could not update process" -ForegroundColor Red
                     $results += [PSCustomObject]@{
                         ObjectType = "Process"
                         ObjectID = $objectId
@@ -1530,7 +1551,6 @@ function Invoke-BulkUpdateLocation {
                     }
                 }
             } else {
-                Write-Host "  Failed: Could not retrieve process" -ForegroundColor Red
                 $results += [PSCustomObject]@{
                     ObjectType = "Process"
                     ObjectID = $objectId
@@ -1543,7 +1563,6 @@ function Invoke-BulkUpdateLocation {
         }
 
         if ($ObjectType -eq "Documents" -or $ObjectType -eq "Both") {
-            Write-Host "Moving Document $objectId to Group $newGroupId - Not fully implemented" -ForegroundColor Yellow
             $results += [PSCustomObject]@{
                 ObjectType = "Document"
                 ObjectID = $objectId
@@ -1554,6 +1573,7 @@ function Invoke-BulkUpdateLocation {
             }
         }
     }
+    Write-Host ""  # New line after progress counter
 
     # Save results
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
@@ -1587,18 +1607,30 @@ function Invoke-BulkUpdateOwnership {
     if (-not $csv) { return }
 
     $results = @()
+    $currentIndex = 0
+    $totalRows = $csv.Count
+
+    Write-Host "`nProcessing $totalRows rows..." -ForegroundColor Cyan
 
     foreach ($row in $csv) {
+        $currentIndex++
+        Write-Host "`r  Processing row $currentIndex of $totalRows..." -NoNewline -ForegroundColor Gray
+
         $processId = Get-IdFromCsvRow -Row $row
         $newOwner = Get-NewOwnerFromCsvRow -Row $row
         $newExpert = Get-NewExpertFromCsvRow -Row $row
 
         if (-not $processId) {
-            Write-Host "Skipping row - missing ProcessID" -ForegroundColor Yellow
+            $results += [PSCustomObject]@{
+                ObjectType = "Process"
+                ObjectID = "N/A"
+                Operation = "UpdateOwnership"
+                Status = "Skipped"
+                Message = "Missing ProcessID"
+                ActionUrl = ""
+            }
             continue
         }
-
-        Write-Host "Updating Process $processId - Owner: $newOwner, Expert: $newExpert" -ForegroundColor White
 
         # Get current process
         $getUrl = "$SiteURL/Api/v1/Processes/$processId"
@@ -1624,7 +1656,6 @@ function Invoke-BulkUpdateOwnership {
                 $updateResult = Invoke-ApiPut -Url $updateUrl -Token $Token -Body $process
 
                 if ($updateResult -and $updateResult.Success) {
-                    Write-Host "  Success: Ownership updated" -ForegroundColor Green
                     $results += [PSCustomObject]@{
                         ObjectType = "Process"
                         ObjectID = $processId
@@ -1634,7 +1665,6 @@ function Invoke-BulkUpdateOwnership {
                         ActionUrl = "$SiteURL/Process/View/$processId"
                     }
                 } else {
-                    Write-Host "  Failed: Could not update process" -ForegroundColor Red
                     $results += [PSCustomObject]@{
                         ObjectType = "Process"
                         ObjectID = $processId
@@ -1645,7 +1675,6 @@ function Invoke-BulkUpdateOwnership {
                     }
                 }
             } else {
-                Write-Host "  Skipped: No owner or expert provided" -ForegroundColor Yellow
                 $results += [PSCustomObject]@{
                     ObjectType = "Process"
                     ObjectID = $processId
@@ -1656,7 +1685,6 @@ function Invoke-BulkUpdateOwnership {
                 }
             }
         } else {
-            Write-Host "  Failed: Could not retrieve process" -ForegroundColor Red
             $results += [PSCustomObject]@{
                 ObjectType = "Process"
                 ObjectID = $processId
@@ -1667,6 +1695,7 @@ function Invoke-BulkUpdateOwnership {
             }
         }
     }
+    Write-Host ""  # New line after progress counter
 
     # Save results
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
