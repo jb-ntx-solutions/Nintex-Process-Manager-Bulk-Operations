@@ -117,6 +117,93 @@ $processes = $response.data
 
 ---
 
+## Process Link Removal Behavior
+
+### CRITICAL: Decision Links vs Process Links
+
+When removing process dependencies, Nintex Process Manager handles different link types differently:
+
+#### Decision Links (ProcessProcedures.Decision)
+
+**Behavior:** Decision links should be **orphaned**, not fully removed.
+
+**What this means:**
+- Clear the link reference fields: `LinkedProcessId`, `LinkedProcessUniqueId`, `LinkedProcessName`
+- **KEEP** `LinkedProcessDisplayName` - Users need to see what was linked
+- Change `DecisionLinkType` from `4` (linked) to `7` (orphaned/broken link)
+- This creates a visual indicator in the UI that a link existed but is now broken
+
+**Example:**
+```json
+// BEFORE removing link (linked decision)
+{
+  "LinkedProcessId": 1472,
+  "LinkedProcessUniqueId": "b8631d0f-b7f8-44bb-80ed-f89886551c42",
+  "LinkedProcessName": "CSM Onboarding Process",
+  "LinkedProcessDisplayName": "CSM Onboarding Process",
+  "DecisionLinkType": 4  // 4 = linked
+}
+
+// AFTER removing link (orphaned decision)
+{
+  "LinkedProcessId": null,
+  "LinkedProcessUniqueId": null,
+  "LinkedProcessName": null,
+  "LinkedProcessDisplayName": "CSM Onboarding Process",  // ✅ KEPT!
+  "DecisionLinkType": 7  // ✅ Changed to 7 = orphaned
+}
+```
+
+#### Process Links (ProcessProcedures.ProcessLink)
+
+**Behavior:** Process links should be **fully removed** from the array.
+
+**What this means:**
+- Remove the entire ProcessLink object from the ProcessProcedures.ProcessLink array
+- No orphaning - the link is completely deleted
+
+**Example:**
+```json
+// BEFORE
+"ProcessLink": [
+  { "LinkedProcessUniqueId": "guid-to-delete", ... },
+  { "LinkedProcessUniqueId": "other-guid", ... }
+]
+
+// AFTER
+"ProcessLink": [
+  { "LinkedProcessUniqueId": "other-guid", ... }
+]
+```
+
+### LinkedStakeholders Must Be Preserved
+
+**CRITICAL:** Do NOT remove entries from `LinkedStakeholders.LinkedStakeholder` array.
+
+**Why:** LinkedStakeholders is a reference cache that Process Manager uses to:
+- Track process relationships
+- Show related processes in the UI
+- Maintain the process dependency graph
+
+**Example:**
+```json
+// Always keep LinkedStakeholders intact, even when removing links
+"LinkedStakeholders": {
+  "LinkedStakeholder": [
+    {"ProcessId": 1502, "Link": "Process A", ...},
+    {"ProcessId": 1472, "Link": "Process B", ...}  // Keep even if we orphaned a decision to Process B
+  ]
+}
+```
+
+### DecisionLinkType Values
+
+- `4` = Active/linked decision
+- `7` = Orphaned/broken decision link
+- Other values may exist but these are the critical ones for link removal
+
+---
+
 ## Update Process APIs
 
 ### Update Active Process

@@ -2726,37 +2726,42 @@ function Remove-ProcessLinksFromJson {
         }
     }
 
-    # Clean Decision node links
+    # Orphan Decision node links (don't fully remove them)
+    # Decision links should be "orphaned" so users can see what was linked
+    # This is done by clearing the link reference but keeping the display name
     if ($processObj.ProcessProcedures.Decision) {
         foreach ($decision in $processObj.ProcessProcedures.Decision) {
             if ($decision.LinkedProcessUniqueId -eq $TargetProcessUniqueId) {
-                # Track ProcessId for LinkedStakeholders removal
+                # Track ProcessId (though we won't remove from LinkedStakeholders)
                 if ($decision.LinkedProcessId) {
                     $processIdsToRemove += $decision.LinkedProcessId
                 }
-                # Clear the linked process fields
+
+                # Orphan the decision link:
+                # - Clear the process references (ID, UniqueId, Name)
+                # - KEEP LinkedProcessDisplayName so users see what was linked
+                # - Change DecisionLinkType from 4 (linked) to 7 (orphaned)
                 $decision.LinkedProcessId = $null
                 $decision.LinkedProcessUniqueId = $null
                 $decision.LinkedProcessName = $null
-                $decision.LinkedProcessDisplayName = $null
+                # LinkedProcessDisplayName - KEEP AS IS (don't set to null)
                 $decision.LinkedProcessGroupId = $null
                 $decision.LinkedProcessGroupName = $null
                 $decision.LinkedProcessGroupUniqueId = $null
+
+                # Change DecisionLinkType from 4 (linked) to 7 (orphaned/broken link)
+                if ($decision.DecisionLinkType -eq 4) {
+                    $decision.DecisionLinkType = 7
+                }
+
                 $linksRemoved++
             }
         }
     }
 
-    # Remove from LinkedStakeholders using ALL the ProcessIds we collected
-    # This must happen AFTER we've processed all link types above
-    if ($processObj.LinkedStakeholders.LinkedStakeholder -and $processIdsToRemove.Count -gt 0) {
-        $originalCount = @($processObj.LinkedStakeholders.LinkedStakeholder).Count
-        $processObj.LinkedStakeholders.LinkedStakeholder = @($processObj.LinkedStakeholders.LinkedStakeholder | Where-Object {
-            $processIdsToRemove -notcontains $_.ProcessId
-        })
-        $newCount = @($processObj.LinkedStakeholders.LinkedStakeholder).Count
-        # Don't count these in linksRemoved as they're just stakeholder entries, not actual links
-    }
+    # NOTE: We do NOT remove from LinkedStakeholders
+    # LinkedStakeholders is a reference cache that helps Process Manager track related processes
+    # The UI uses this to show process relationships, and it should be preserved
 
     # Convert back to JSON string
     $cleanedJson = $processObj | ConvertTo-Json -Depth 20 -Compress
