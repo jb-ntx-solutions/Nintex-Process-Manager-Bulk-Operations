@@ -658,34 +658,32 @@ function Get-ProcessGroupById {
         if ($isGuid) {
             Write-Host "Looking up group by GUID: $GroupId" -ForegroundColor Gray
 
-            # Use breadcrumb API to verify the group exists and get its details
-            # This is much faster than fetching the entire tree
-            $url = "$SiteURL/bff/navigation/api/v1/breadcrumb/children?type=ProcessGroup&id=$GroupId"
-            $response = Invoke-ApiGet -Url $url -Token $Token
+            # Try direct API endpoint first (most reliable)
+            $directUrl = "$SiteURL/Api/v1/ProcessGroups/$GroupId"
+            $directResponse = Invoke-ApiGet -Url $directUrl -Token $Token
 
-            if ($response) {
-                # The breadcrumb API validates the group exists
-                # Now we need to get the group's name and numeric ID
-                # We can get the name from the breadcrumb itself
-                $breadcrumbUrl = "$SiteURL/bff/navigation/api/v1/breadcrumb?type=ProcessGroup&id=$GroupId"
-                $breadcrumbResponse = Invoke-ApiGet -Url $breadcrumbUrl -Token $Token
+            if ($directResponse -and $directResponse.processGroupJson) {
+                $groupJson = $directResponse.processGroupJson
+                Write-Host "Found group: $($groupJson.Name)" -ForegroundColor Green
 
-                if ($breadcrumbResponse -and $breadcrumbResponse.breadcrumb) {
-                    # Find the target group in the breadcrumb trail (it's the last item)
-                    $targetGroup = $breadcrumbResponse.breadcrumb | Where-Object { $_.id -eq $GroupId } | Select-Object -Last 1
+                return @{
+                    id = $groupJson.Id
+                    uniqueId = $groupJson.UniqueId
+                    name = $groupJson.Name
+                }
+            }
 
-                    if ($targetGroup) {
-                        # Get numeric ID from root groups (fast lookup)
-                        $numericId = Get-GroupNumericIdFromTree -SiteURL $SiteURL -Token $Token -TargetUniqueId $GroupId
+            # Fallback: Search the tree for the group
+            Write-Host "  Direct API lookup failed, searching group tree..." -ForegroundColor Gray
+            $numericId = Get-GroupNumericIdFromTree -SiteURL $SiteURL -Token $Token -TargetUniqueId $GroupId
 
-                        Write-Host "Found group: $($targetGroup.name)" -ForegroundColor Green
+            if ($numericId -and $numericId -ne -1) {
+                # We found the numeric ID, now get the full group details from the tree
+                $group = Find-GroupInTreeByNumericId -SiteURL $SiteURL -Token $Token -TargetNumericId $numericId
 
-                        return @{
-                            id = $numericId
-                            uniqueId = $GroupId
-                            name = $targetGroup.name
-                        }
-                    }
+                if ($group) {
+                    Write-Host "Found group: $($group.name)" -ForegroundColor Green
+                    return $group
                 }
             }
 
@@ -3036,58 +3034,97 @@ function Invoke-BulkDeleteProcesses {
         Write-Host "`n=== Getting Process Details ===" -ForegroundColor Cyan
 
     $processDeleteMap = @{}  # Maps any ID to object with {NumericId, UniqueId, GroupUniqueId}
-    $currentIndex = 0
-    $totalProcesses = $processesToDelete.Count
 
-    foreach ($processId in $processesToDelete) {
-        $currentIndex++
-        Write-Host "`r  Getting Process Details $currentIndex out of $totalProcesses..." -NoNewline -ForegroundColor Gray
+    # Special handling for archived processes - use mobile API endpoint
+    if ($SourceType -eq "Archived") {
+        # For archived processes, use the mobile API to batch-fetch details
+        Write-Host "  Fetching archived process details using mobile API..." -ForegroundColor Gray
 
-        # Check if the ID is already a GUID (UniqueId) or a numeric ID
-        $guidRegex = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+        $batchSize = 10
+        $totalProcesses = $processesToDelete.Count
+        $processedCount = 0
 
-        if ($processId -match $guidRegex) {
-            # It's already a UniqueId (GUID format), need to fetch numeric ID and group info
-            $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processId
-            if ($processStatus) {
-                $numericId = $processStatus.Id
-                $groupUniqueId = if ($processStatus.GroupUniqueId) {
-                    $processStatus.GroupUniqueId
-                } else {
-                    $null
+        for ($i = 0; $i -lt $processesToDelete.Count; $i += $batchSize) {
+            $endIndex = [Math]::Min($i + $batchSize - 1, $processesToDelete.Count - 1)
+            $batch = $processesToDelete[$i..$endIndex]
+            $uniqueIdsParam = $batch -join ","
+
+            $processedCount += $batch.Count
+            Write-Host "`r  Getting Process Details $processedCount out of $totalProcesses..." -NoNewline -ForegroundColor Gray
+
+            $url = "$SiteURL/mobile/api/v1/processes?processUniqueIds=$uniqueIdsParam"
+            $response = Invoke-ApiGet -Url $url -Token $Token
+
+            if ($response -and $response.data) {
+                foreach ($processData in $response.data) {
+                    if ($processData.ProcessModel) {
+                        $model = $processData.ProcessModel
+                        $processDeleteMap[$model.UniqueId] = @{
+                            NumericId = $model.Id
+                            UniqueId = $model.UniqueId
+                            GroupUniqueId = $model.GroupUniqueId
+                        }
+                    }
                 }
-                $processDeleteMap[$processId] = @{
-                    NumericId = $numericId
-                    UniqueId = $processId
-                    GroupUniqueId = $groupUniqueId
-                }
-            } else {
-                Write-Host "`n  Warning: Could not retrieve process details for UniqueId $processId" -ForegroundColor Yellow
-            }
-        } else {
-            # It's a numeric ID, fetch the process to get the UniqueId and group info
-            $getUrl = "$SiteURL/Api/v1/Processes/$processId"
-            $process = Invoke-ApiGet -Url $getUrl -Token $Token
-            if ($process -and $process.uniqueId) {
-                # Get the process status to retrieve group information
-                $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $process.uniqueId
-                $groupUniqueId = if ($processStatus -and $processStatus.GroupUniqueId) {
-                    $processStatus.GroupUniqueId
-                } else {
-                    $null
-                }
-                $processDeleteMap[$processId] = @{
-                    NumericId = $processId
-                    UniqueId = $process.uniqueId
-                    GroupUniqueId = $groupUniqueId
-                }
-                Write-Host "  Process ID $processId -> UniqueId: $($process.uniqueId), GroupUniqueId: $groupUniqueId" -ForegroundColor Gray
-            } else {
-                Write-Host "  Warning: Could not retrieve process details for ID $processId" -ForegroundColor Yellow
             }
         }
+        Write-Host ""  # New line after progress counter
     }
-    Write-Host ""  # New line after progress counter
+    else {
+        # For non-archived processes, use the regular API endpoint
+        $currentIndex = 0
+        $totalProcesses = $processesToDelete.Count
+
+        foreach ($processId in $processesToDelete) {
+            $currentIndex++
+            Write-Host "`r  Getting Process Details $currentIndex out of $totalProcesses..." -NoNewline -ForegroundColor Gray
+
+            # Check if the ID is already a GUID (UniqueId) or a numeric ID
+            $guidRegex = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
+            if ($processId -match $guidRegex) {
+                # It's already a UniqueId (GUID format), need to fetch numeric ID and group info
+                $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processId
+                if ($processStatus) {
+                    $numericId = $processStatus.Id
+                    $groupUniqueId = if ($processStatus.GroupUniqueId) {
+                        $processStatus.GroupUniqueId
+                    } else {
+                        $null
+                    }
+                    $processDeleteMap[$processId] = @{
+                        NumericId = $numericId
+                        UniqueId = $processId
+                        GroupUniqueId = $groupUniqueId
+                    }
+                } else {
+                    Write-Host "`n  Warning: Could not retrieve process details for UniqueId $processId" -ForegroundColor Yellow
+                }
+            } else {
+                # It's a numeric ID, fetch the process to get the UniqueId and group info
+                $getUrl = "$SiteURL/Api/v1/Processes/$processId"
+                $process = Invoke-ApiGet -Url $getUrl -Token $Token
+                if ($process -and $process.uniqueId) {
+                    # Get the process status to retrieve group information
+                    $processStatus = Get-ProcessStatus -SiteURL $SiteURL -Token $Token -ProcessUniqueId $process.uniqueId
+                    $groupUniqueId = if ($processStatus -and $processStatus.GroupUniqueId) {
+                        $processStatus.GroupUniqueId
+                    } else {
+                        $null
+                    }
+                    $processDeleteMap[$processId] = @{
+                        NumericId = $processId
+                        UniqueId = $process.uniqueId
+                        GroupUniqueId = $groupUniqueId
+                    }
+                    Write-Host "  Process ID $processId -> UniqueId: $($process.uniqueId), GroupUniqueId: $groupUniqueId" -ForegroundColor Gray
+                } else {
+                    Write-Host "  Warning: Could not retrieve process details for ID $processId" -ForegroundColor Yellow
+                }
+            }
+        }
+        Write-Host ""  # New line after progress counter
+    }
 
     # PREVIEW MODE: Exit early with summary
     if ($WhatIf) {
