@@ -2515,24 +2515,22 @@ function Get-ActiveProcessDependencies {
             $url = "$SiteURL/Api/v1/Processes/$targetUniqueId/CheckProcessDependencies?searchBehavior=15"
             $dependencies = Invoke-ApiGet -Url $url -Token $Token
 
-            # DEBUG: Show what we got back
-            Write-Host ""
-            Write-Host "  DEBUG: API URL: $url" -ForegroundColor Magenta
-            Write-Host "  DEBUG: Dependencies type: $($dependencies.GetType().FullName)" -ForegroundColor Magenta
-            Write-Host "  DEBUG: Dependencies is null: $($dependencies -eq $null)" -ForegroundColor Magenta
-            Write-Host "  DEBUG: Dependencies count: $($dependencies.Count)" -ForegroundColor Magenta
             if ($dependencies) {
-                Write-Host "  DEBUG: Dependencies JSON:" -ForegroundColor Magenta
-                Write-Host "$(ConvertTo-Json $dependencies -Depth 5)" -ForegroundColor Magenta
-            }
-            Write-Host ""
+                # PowerShell's ConvertFrom-Json converts single-element arrays to single objects
+                # We need to handle both cases: array or single object
+                $depArray = @()
+                if ($dependencies -is [Array]) {
+                    $depArray = $dependencies
+                } else {
+                    # Single object - wrap it in an array
+                    $depArray = @($dependencies)
+                }
 
-            if ($dependencies -and $dependencies.Count -gt 0) {
-                foreach ($depType in $dependencies) {
+                foreach ($depType in $depArray) {
                     $typeName = $depType.Type
 
                     # Only process "Linked Process" dependencies (active processes that reference this one)
-                    if ($typeName -eq "Linked Process") {
+                    if ($typeName -eq "Linked Process" -and $depType.Dependencies) {
                         foreach ($dep in $depType.Dependencies) {
                             $depUniqueId = $dep.UniqueId
                             $depName = $dep.Name
