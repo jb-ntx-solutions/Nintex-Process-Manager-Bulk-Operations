@@ -980,11 +980,14 @@ function Delete-ProcessGroup {
     param(
         [string]$SiteURL,
         [string]$Token,
-        [string]$GroupUniqueId
+        [string]$GroupUniqueId,
+        [switch]$Silent
     )
 
     try {
-        Write-Host "Deleting process group (UniqueId: $GroupUniqueId)..." -ForegroundColor Gray
+        if (-not $Silent) {
+            Write-Host "Deleting process group (UniqueId: $GroupUniqueId)..." -ForegroundColor Gray
+        }
 
         $deleteUrl = "$SiteURL/Process/Edit/DeleteGroup"
         $deleteBody = @{
@@ -994,15 +997,21 @@ function Delete-ProcessGroup {
         $result = Invoke-ApiPost -Url $deleteUrl -Token $Token -Body $deleteBody
 
         if ($result) {
-            Write-Host "  Successfully deleted temporary group" -ForegroundColor Green
+            if (-not $Silent) {
+                Write-Host "  Successfully deleted temporary group" -ForegroundColor Green
+            }
             return $true
         } else {
-            Write-Host "  Failed to delete group" -ForegroundColor Red
+            if (-not $Silent) {
+                Write-Host "  Failed to delete group" -ForegroundColor Red
+            }
             return $false
         }
     }
     catch {
-        Write-Host "  Error deleting process group: $($_.Exception.Message)" -ForegroundColor Red
+        if (-not $Silent) {
+            Write-Host "  Error deleting process group: $($_.Exception.Message)" -ForegroundColor Red
+        }
         return $false
     }
 }
@@ -3734,11 +3743,14 @@ function Invoke-BulkDeleteProcesses {
                 Write-Host "`nDeleting groups from bottom to top (children before parents)..." -ForegroundColor Cyan
                 $groupDeleteCount = 0
                 $groupDeleteFailCount = 0
+                $currentIndex = 0
+                $totalGroups = $groupsToDelete.Count
 
                 foreach ($grp in $groupsToDelete) {
-                    Write-Host "  Deleting group: $($grp.Name) (Depth: $($grp.Depth))..." -ForegroundColor Gray
+                    $currentIndex++
+                    Write-Host "`r  Deleting group $currentIndex of $totalGroups..." -NoNewline -ForegroundColor Gray
 
-                    $deleteSuccess = Delete-ProcessGroup -SiteURL $SiteURL -Token $Token -GroupUniqueId $grp.UniqueId
+                    $deleteSuccess = Delete-ProcessGroup -SiteURL $SiteURL -Token $Token -GroupUniqueId $grp.UniqueId -Silent
 
                     if ($deleteSuccess) {
                         $groupDeleteCount++
@@ -3762,6 +3774,7 @@ function Invoke-BulkDeleteProcesses {
                         }
                     }
                 }
+                Write-Host ""  # New line after progress counter
 
                 Write-Host "`nGroup deletion complete:" -ForegroundColor Green
                 Write-Host "  Successfully deleted: $groupDeleteCount" -ForegroundColor Green
