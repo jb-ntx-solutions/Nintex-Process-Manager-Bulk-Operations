@@ -662,14 +662,43 @@ function Get-ProcessGroupById {
             $directUrl = "$SiteURL/Api/v1/ProcessGroups/$GroupId"
             $directResponse = Invoke-ApiGet -Url $directUrl -Token $Token
 
-            if ($directResponse -and $directResponse.processGroupJson) {
-                $groupJson = $directResponse.processGroupJson
-                Write-Host "Found group: $($groupJson.Name)" -ForegroundColor Green
+            # DEBUG: Log what we received
+            if ($directResponse) {
+                Write-Host "  DEBUG: Received response from API" -ForegroundColor DarkGray
+                Write-Host "  DEBUG: Response type: $($directResponse.GetType().Name)" -ForegroundColor DarkGray
+                Write-Host "  DEBUG: Response properties: $($directResponse.PSObject.Properties.Name -join ', ')" -ForegroundColor DarkGray
+            } else {
+                Write-Host "  DEBUG: No response from $directUrl" -ForegroundColor DarkGray
+            }
 
-                return @{
-                    id = $groupJson.Id
-                    uniqueId = $groupJson.UniqueId
-                    name = $groupJson.Name
+            # Check multiple possible response structures
+            if ($directResponse) {
+                $groupJson = $null
+
+                # Try different response structures
+                if ($directResponse.processGroupJson) {
+                    $groupJson = $directResponse.processGroupJson
+                }
+                elseif ($directResponse.id -or $directResponse.Id) {
+                    # Response might be the group object directly
+                    $groupJson = $directResponse
+                }
+                elseif ($directResponse.ProcessGroup) {
+                    $groupJson = $directResponse.ProcessGroup
+                }
+
+                if ($groupJson -and ($groupJson.UniqueId -or $groupJson.uniqueId)) {
+                    $name = if ($groupJson.Name) { $groupJson.Name } else { $groupJson.name }
+                    $id = if ($groupJson.Id) { $groupJson.Id } else { $groupJson.id }
+                    $uniqueId = if ($groupJson.UniqueId) { $groupJson.UniqueId } else { $groupJson.uniqueId }
+
+                    Write-Host "Found group: $name" -ForegroundColor Green
+
+                    return @{
+                        id = $id
+                        uniqueId = $uniqueId
+                        name = $name
+                    }
                 }
             }
 
