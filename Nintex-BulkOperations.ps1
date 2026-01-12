@@ -1,5 +1,5 @@
 # Nintex Process Manager Bulk Operations Script
-# Version 2.8 (Optimized Group Lookup)
+# Version 3.0 (Dry-Run Preview Mode)
 # Supports: Archive, Restore, Update Location, Update Ownership, and Delete operations
 
 #Requires -Version 5.1
@@ -980,11 +980,14 @@ function Delete-ProcessGroup {
     param(
         [string]$SiteURL,
         [string]$Token,
-        [string]$GroupUniqueId
+        [string]$GroupUniqueId,
+        [switch]$Silent
     )
 
     try {
-        Write-Host "Deleting process group (UniqueId: $GroupUniqueId)..." -ForegroundColor Gray
+        if (-not $Silent) {
+            Write-Host "Deleting process group (UniqueId: $GroupUniqueId)..." -ForegroundColor Gray
+        }
 
         $deleteUrl = "$SiteURL/Process/Edit/DeleteGroup"
         $deleteBody = @{
@@ -994,17 +997,104 @@ function Delete-ProcessGroup {
         $result = Invoke-ApiPost -Url $deleteUrl -Token $Token -Body $deleteBody
 
         if ($result) {
-            Write-Host "  Successfully deleted temporary group" -ForegroundColor Green
+            if (-not $Silent) {
+                Write-Host "  Successfully deleted temporary group" -ForegroundColor Green
+            }
             return $true
         } else {
-            Write-Host "  Failed to delete group" -ForegroundColor Red
+            if (-not $Silent) {
+                Write-Host "  Failed to delete group" -ForegroundColor Red
+            }
             return $false
         }
     }
     catch {
-        Write-Host "  Error deleting process group: $($_.Exception.Message)" -ForegroundColor Red
+        if (-not $Silent) {
+            Write-Host "  Error deleting process group: $($_.Exception.Message)" -ForegroundColor Red
+        }
         return $false
     }
+}
+
+function Get-GroupsInTree {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$RootGroupUniqueId,
+        [int]$RootGroupId = -1,
+        [switch]$IncludeRoot = $true
+    )
+
+    # Get all groups in the site
+    $allGroups = Get-ProcessGroups -SiteURL $SiteURL -Token $Token
+    if (-not $allGroups) {
+        Write-Host "Warning: Could not retrieve process groups" -ForegroundColor Yellow
+        return @()
+    }
+
+    # Find the root group
+    $rootGroup = $null
+    if ($RootGroupUniqueId) {
+        $rootGroup = $allGroups | Where-Object { $_.uniqueId -eq $RootGroupUniqueId } | Select-Object -First 1
+    } elseif ($RootGroupId -gt 0) {
+        $rootGroup = $allGroups | Where-Object { $_.id -eq $RootGroupId } | Select-Object -First 1
+    }
+
+    if (-not $rootGroup) {
+        Write-Host "Warning: Could not find root group" -ForegroundColor Yellow
+        return @()
+    }
+
+    # Recursive function to get all descendant groups with their depth
+    function Get-DescendantGroups {
+        param(
+            [object]$ParentGroup,
+            [array]$AllGroups,
+            [int]$Depth = 0
+        )
+
+        $results = @()
+
+        # Get direct children of this group
+        $children = $AllGroups | Where-Object { $_.parentId -eq $ParentGroup.id }
+
+        foreach ($child in $children) {
+            # Add this child with its depth
+            $results += [PSCustomObject]@{
+                Group = $child
+                Depth = $Depth
+                UniqueId = $child.uniqueId
+                Name = $child.name
+                Id = $child.id
+            }
+
+            # Recursively get this child's descendants
+            $childDescendants = Get-DescendantGroups -ParentGroup $child -AllGroups $AllGroups -Depth ($Depth + 1)
+            $results += $childDescendants
+        }
+
+        return $results
+    }
+
+    # Get all descendants
+    $groupsInTree = Get-DescendantGroups -ParentGroup $rootGroup -AllGroups $allGroups -Depth 1
+
+    # Include root group if requested
+    if ($IncludeRoot) {
+        $rootGroupInfo = [PSCustomObject]@{
+            Group = $rootGroup
+            Depth = 0
+            UniqueId = $rootGroup.uniqueId
+            Name = $rootGroup.name
+            Id = $rootGroup.id
+        }
+        $groupsInTree = @($rootGroupInfo) + $groupsInTree
+    }
+
+    # Sort by depth descending (deepest first) so we delete children before parents
+    $groupsInTree = $groupsInTree | Sort-Object -Property Depth -Descending
+
+    return $groupsInTree
 }
 
 function Show-GroupTree {
@@ -1184,12 +1274,19 @@ function Invoke-BulkArchive {
         [string]$ObjectType,  # "Processes", "Documents", or "Both"
         [string]$CsvPath = "",
         [int]$GroupID = -1,
-        [string]$GroupUniqueId = ""
+        [string]$GroupUniqueId = "",
+        [switch]$WhatIf
     )
 
     Write-Host "`n========================================" -ForegroundColor Cyan
-    Write-Host "BULK ARCHIVE OPERATION" -ForegroundColor Cyan
-    Write-Host "========================================" -ForegroundColor Cyan
+    if ($WhatIf) {
+        Write-Host "BULK ARCHIVE OPERATION (DRY-RUN PREVIEW)" -ForegroundColor Yellow
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "*** PREVIEW MODE: No changes will be made ***" -ForegroundColor Yellow
+    } else {
+        Write-Host "BULK ARCHIVE OPERATION" -ForegroundColor Cyan
+        Write-Host "========================================" -ForegroundColor Cyan
+    }
 
     $results = @()
     $processesToArchive = @()
@@ -1230,10 +1327,22 @@ function Invoke-BulkArchive {
 
     # Archive processes
     if ($processesToArchive.Count -gt 0) {
-        Write-Host "`nArchiving $($processesToArchive.Count) processes..." -ForegroundColor Cyan
+        if ($WhatIf) {
+            Write-Host "`n[PREVIEW] Would archive $($processesToArchive.Count) processes..." -ForegroundColor Yellow
+        } else {
+            Write-Host "`nArchiving $($processesToArchive.Count) processes..." -ForegroundColor Cyan
+        }
+
+        $currentIndex = 0
+        $totalProcesses = $processesToArchive.Count
 
         foreach ($processId in $processesToArchive) {
-            Write-Host "Archiving Process ID: $processId" -ForegroundColor White
+            $currentIndex++
+            if ($WhatIf) {
+                Write-Host "`r  [PREVIEW] Checking Process $currentIndex of $totalProcesses..." -NoNewline -ForegroundColor Yellow
+            } else {
+                Write-Host "`r  Archiving Process $currentIndex of $totalProcesses..." -NoNewline -ForegroundColor Gray
+            }
 
             # Fetch process details to get uniqueId
             $verifyUrl = "$SiteURL/Api/v1/Processes/$processId"
@@ -1242,42 +1351,53 @@ function Invoke-BulkArchive {
             if ($process -and $process.uniqueId) {
                 $processUniqueId = $process.uniqueId
 
-                # Use Archive-Process helper
-                $result = Archive-Process -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId -Comment "Bulk archive operation"
+                if ($WhatIf) {
+                    # Dry-run: Show what would happen
+                    $processName = if ($process.name) { $process.name } else { "Unknown" }
+                    $archiveStatus = if ($process.isArchived) { "Already Archived" } else { "Would Archive" }
 
-                if ($result) {
-                    # Verify archive
-                    $process = Invoke-ApiGet -Url $verifyUrl -Token $Token
-                    if ($process -and $process.isArchived) {
-                        Write-Host "  Success: Process archived" -ForegroundColor Green
-                        $results += [PSCustomObject]@{
-                            ObjectType = "Process"
-                            ObjectID = $processId
-                            Operation = "Archive"
-                            Status = "Success"
-                            Message = "Archived successfully"
+                    $results += [PSCustomObject]@{
+                        ObjectType = "Process"
+                        ObjectID = $processId
+                        Operation = "Archive"
+                        Status = "Preview"
+                        Message = "$archiveStatus - $processName"
+                    }
+                } else {
+                    # Actual operation
+                    $result = Archive-Process -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId -Comment "Bulk archive operation"
+
+                    if ($result) {
+                        # Verify archive
+                        $process = Invoke-ApiGet -Url $verifyUrl -Token $Token
+                        if ($process -and $process.isArchived) {
+                            $results += [PSCustomObject]@{
+                                ObjectType = "Process"
+                                ObjectID = $processId
+                                Operation = "Archive"
+                                Status = "Success"
+                                Message = "Archived successfully"
+                            }
+                        } else {
+                            $results += [PSCustomObject]@{
+                                ObjectType = "Process"
+                                ObjectID = $processId
+                                Operation = "Archive"
+                                Status = "Failed"
+                                Message = "Could not archive"
+                            }
                         }
                     } else {
-                        Write-Host "  Failed: Could not archive process" -ForegroundColor Red
                         $results += [PSCustomObject]@{
                             ObjectType = "Process"
                             ObjectID = $processId
                             Operation = "Archive"
                             Status = "Failed"
-                            Message = "Could not archive"
+                            Message = "Archive API call failed"
                         }
-                    }
-                } else {
-                    $results += [PSCustomObject]@{
-                        ObjectType = "Process"
-                        ObjectID = $processId
-                        Operation = "Archive"
-                        Status = "Failed"
-                        Message = "Archive API call failed"
                     }
                 }
             } else {
-                Write-Host "  Failed: Could not retrieve process details" -ForegroundColor Red
                 $results += [PSCustomObject]@{
                     ObjectType = "Process"
                     ObjectID = $processId
@@ -1287,49 +1407,89 @@ function Invoke-BulkArchive {
                 }
             }
         }
+        Write-Host ""  # New line after progress counter
     }
 
     # Archive documents (if applicable)
     if ($documentsToArchive.Count -gt 0) {
-        Write-Host "`nArchiving $($documentsToArchive.Count) documents..." -ForegroundColor Cyan
+        if ($WhatIf) {
+            Write-Host "`n[PREVIEW] Would archive $($documentsToArchive.Count) documents..." -ForegroundColor Yellow
+        } else {
+            Write-Host "`nArchiving $($documentsToArchive.Count) documents..." -ForegroundColor Cyan
+        }
         Write-Host "Note: Document archiving may not be supported in all Nintex PM versions" -ForegroundColor Yellow
 
+        $currentIndex = 0
+        $totalDocuments = $documentsToArchive.Count
+
         foreach ($docId in $documentsToArchive) {
-            Write-Host "Archiving Document ID: $docId" -ForegroundColor White
+            $currentIndex++
+            if ($WhatIf) {
+                Write-Host "`r  [PREVIEW] Checking Document $currentIndex of $totalDocuments..." -NoNewline -ForegroundColor Yellow
+            } else {
+                Write-Host "`r  Archiving Document $currentIndex of $totalDocuments..." -NoNewline -ForegroundColor Gray
+            }
 
-            # Adjust endpoint based on your version
-            $archiveUrl = "$SiteURL/Api/v1/Documents/$docId/Archive"
-            $result = Invoke-ApiPost -Url $archiveUrl -Token $Token
-
-            if ($result) {
+            if ($WhatIf) {
+                # Dry-run: Preview
                 $results += [PSCustomObject]@{
                     ObjectType = "Document"
                     ObjectID = $docId
                     Operation = "Archive"
-                    Status = "Success"
-                    Message = "Archived"
+                    Status = "Preview"
+                    Message = "Would Archive"
                 }
             } else {
-                $results += [PSCustomObject]@{
-                    ObjectType = "Document"
-                    ObjectID = $docId
-                    Operation = "Archive"
-                    Status = "Failed"
-                    Message = "Archive failed"
+                # Actual operation
+                $archiveUrl = "$SiteURL/Api/v1/Documents/$docId/Archive"
+                $result = Invoke-ApiPost -Url $archiveUrl -Token $Token
+
+                if ($result) {
+                    $results += [PSCustomObject]@{
+                        ObjectType = "Document"
+                        ObjectID = $docId
+                        Operation = "Archive"
+                        Status = "Success"
+                        Message = "Archived"
+                    }
+                } else {
+                    $results += [PSCustomObject]@{
+                        ObjectType = "Document"
+                        ObjectID = $docId
+                        Operation = "Archive"
+                        Status = "Failed"
+                        Message = "Archive failed"
+                    }
                 }
             }
         }
+        Write-Host ""  # New line after progress counter
     }
 
     # Save results
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $outputPath = "Archive_Results_$timestamp.csv"
+    if ($WhatIf) {
+        $outputPath = "Archive_Preview_$timestamp.csv"
+    } else {
+        $outputPath = "Archive_Results_$timestamp.csv"
+    }
     $results | Export-Csv -Path $outputPath -NoTypeInformation
 
-    Write-Host "`nResults saved to: $outputPath" -ForegroundColor Green
-    Write-Host "Total operations: $($results.Count)" -ForegroundColor Cyan
-    Write-Host "Successful: $(($results | Where-Object {$_.Status -eq 'Success'}).Count)" -ForegroundColor Green
-    Write-Host "Failed: $(($results | Where-Object {$_.Status -eq 'Failed'}).Count)" -ForegroundColor Red
+    Write-Host ""
+    if ($WhatIf) {
+        Write-Host "Preview results saved to: $outputPath" -ForegroundColor Yellow
+        Write-Host "Total items checked: $($results.Count)" -ForegroundColor Cyan
+        Write-Host "Would archive: $(($results | Where-Object {$_.Status -eq 'Preview' -and $_.Message -like 'Would Archive*'}).Count)" -ForegroundColor Yellow
+        Write-Host "Already archived: $(($results | Where-Object {$_.Status -eq 'Preview' -and $_.Message -like 'Already Archived*'}).Count)" -ForegroundColor Gray
+        Write-Host "Failed to check: $(($results | Where-Object {$_.Status -eq 'Failed'}).Count)" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "*** This was a PREVIEW - no changes were made ***" -ForegroundColor Yellow
+    } else {
+        Write-Host "Results saved to: $outputPath" -ForegroundColor Green
+        Write-Host "Total operations: $($results.Count)" -ForegroundColor Cyan
+        Write-Host "Successful: $(($results | Where-Object {$_.Status -eq 'Success'}).Count)" -ForegroundColor Green
+        Write-Host "Failed: $(($results | Where-Object {$_.Status -eq 'Failed'}).Count)" -ForegroundColor Red
+    }
 }
 
 # ============================================================================
@@ -1343,12 +1503,19 @@ function Invoke-BulkRestore {
         [string]$SourceType,  # "CSV" or "All"
         [string]$ObjectType,  # "Processes", "Documents", or "Both"
         [string]$CsvPath = "",
-        [int]$RestoreGroupID
+        [int]$RestoreGroupID,
+        [switch]$WhatIf
     )
 
     Write-Host "`n========================================" -ForegroundColor Cyan
-    Write-Host "BULK RESTORE OPERATION" -ForegroundColor Cyan
-    Write-Host "========================================" -ForegroundColor Cyan
+    if ($WhatIf) {
+        Write-Host "BULK RESTORE OPERATION (DRY-RUN PREVIEW)" -ForegroundColor Yellow
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "*** PREVIEW MODE: No changes will be made ***" -ForegroundColor Yellow
+    } else {
+        Write-Host "BULK RESTORE OPERATION" -ForegroundColor Cyan
+        Write-Host "========================================" -ForegroundColor Cyan
+    }
 
     $results = @()
     $processesToRestore = @()
@@ -1385,55 +1552,96 @@ function Invoke-BulkRestore {
 
     # Restore processes
     if ($processesToRestore.Count -gt 0) {
-        Write-Host "`nRestoring $($processesToRestore.Count) processes to Group ID: $RestoreGroupID..." -ForegroundColor Cyan
+        if ($WhatIf) {
+            Write-Host "`n[PREVIEW] Would restore $($processesToRestore.Count) processes to Group ID: $RestoreGroupID..." -ForegroundColor Yellow
+        } else {
+            Write-Host "`nRestoring $($processesToRestore.Count) processes to Group ID: $RestoreGroupID..." -ForegroundColor Cyan
+        }
+
+        $currentIndex = 0
+        $totalProcesses = $processesToRestore.Count
 
         foreach ($processId in $processesToRestore) {
-            Write-Host "Restoring Process ID: $processId" -ForegroundColor White
-
-            $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess"
-            $restoreBody = @{
-                processUniqueId = $processId
-                processGroupId = $RestoreGroupID.ToString()
+            $currentIndex++
+            if ($WhatIf) {
+                Write-Host "`r  [PREVIEW] Checking Process $currentIndex of $totalProcesses..." -NoNewline -ForegroundColor Yellow
+            } else {
+                Write-Host "`r  Restoring Process $currentIndex of $totalProcesses..." -NoNewline -ForegroundColor Gray
             }
-            $result = Invoke-ApiPost -Url $restoreUrl -Token $Token -Body $restoreBody
 
-            if ($result) {
-                # Verify restore
-                $verifyUrl = "$SiteURL/Api/v1/Processes/$processId"
-                $process = Invoke-ApiGet -Url $verifyUrl -Token $Token
+            # Fetch process details to check current status
+            $verifyUrl = "$SiteURL/Api/v1/Processes/$processId"
+            $process = Invoke-ApiGet -Url $verifyUrl -Token $Token
 
-                if ($process -and -not $process.isArchived) {
-                    Write-Host "  Success: Process restored" -ForegroundColor Green
+            if ($WhatIf) {
+                # Dry-run: Show what would happen
+                if ($process) {
+                    $processName = if ($process.name) { $process.name } else { "Unknown" }
+                    $restoreStatus = if ($process.isArchived) { "Would Restore" } else { "Already Active" }
+
                     $results += [PSCustomObject]@{
                         ObjectType = "Process"
                         ObjectID = $processId
                         Operation = "Restore"
-                        Status = "Success"
-                        Message = "Restored to Group $RestoreGroupID"
+                        Status = "Preview"
+                        Message = "$restoreStatus - $processName"
                         ActionUrl = "$SiteURL/Process/View/$processId"
                     }
                 } else {
-                    Write-Host "  Failed: Process may still be archived" -ForegroundColor Red
                     $results += [PSCustomObject]@{
                         ObjectType = "Process"
                         ObjectID = $processId
                         Operation = "Restore"
                         Status = "Failed"
-                        Message = "Verification failed"
+                        Message = "Could not retrieve process"
                         ActionUrl = ""
                     }
                 }
             } else {
-                $results += [PSCustomObject]@{
-                    ObjectType = "Process"
-                    ObjectID = $processId
-                    Operation = "Restore"
-                    Status = "Failed"
-                    Message = "Restore API call failed"
-                    ActionUrl = ""
+                # Actual operation
+                $restoreUrl = "$SiteURL/Process/Edit/RestoreProcess"
+                $restoreBody = @{
+                    processUniqueId = $processId
+                    processGroupId = $RestoreGroupID.ToString()
+                }
+                $result = Invoke-ApiPost -Url $restoreUrl -Token $Token -Body $restoreBody
+
+                if ($result) {
+                    # Verify restore
+                    $process = Invoke-ApiGet -Url $verifyUrl -Token $Token
+
+                    if ($process -and -not $process.isArchived) {
+                        $results += [PSCustomObject]@{
+                            ObjectType = "Process"
+                            ObjectID = $processId
+                            Operation = "Restore"
+                            Status = "Success"
+                            Message = "Restored to Group $RestoreGroupID"
+                            ActionUrl = "$SiteURL/Process/View/$processId"
+                        }
+                    } else {
+                        $results += [PSCustomObject]@{
+                            ObjectType = "Process"
+                            ObjectID = $processId
+                            Operation = "Restore"
+                            Status = "Failed"
+                            Message = "Verification failed"
+                            ActionUrl = ""
+                        }
+                    }
+                } else {
+                    $results += [PSCustomObject]@{
+                        ObjectType = "Process"
+                        ObjectID = $processId
+                        Operation = "Restore"
+                        Status = "Failed"
+                        Message = "Restore API call failed"
+                        ActionUrl = ""
+                    }
                 }
             }
         }
+        Write-Host ""  # New line after progress counter
     }
 
     # Restore documents
@@ -1454,13 +1662,28 @@ function Invoke-BulkRestore {
 
     # Save results
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $outputPath = "Restore_Results_$timestamp.csv"
+    if ($WhatIf) {
+        $outputPath = "Restore_Preview_$timestamp.csv"
+    } else {
+        $outputPath = "Restore_Results_$timestamp.csv"
+    }
     $results | Export-Csv -Path $outputPath -NoTypeInformation
 
-    Write-Host "`nResults saved to: $outputPath" -ForegroundColor Green
-    Write-Host "Total operations: $($results.Count)" -ForegroundColor Cyan
-    Write-Host "Successful: $(($results | Where-Object {$_.Status -eq 'Success'}).Count)" -ForegroundColor Green
-    Write-Host "Failed: $(($results | Where-Object {$_.Status -eq 'Failed'}).Count)" -ForegroundColor Red
+    Write-Host ""
+    if ($WhatIf) {
+        Write-Host "Preview results saved to: $outputPath" -ForegroundColor Yellow
+        Write-Host "Total items checked: $($results.Count)" -ForegroundColor Cyan
+        Write-Host "Would restore: $(($results | Where-Object {$_.Status -eq 'Preview' -and $_.Message -like 'Would Restore*'}).Count)" -ForegroundColor Yellow
+        Write-Host "Already active: $(($results | Where-Object {$_.Status -eq 'Preview' -and $_.Message -like 'Already Active*'}).Count)" -ForegroundColor Gray
+        Write-Host "Failed to check: $(($results | Where-Object {$_.Status -eq 'Failed'}).Count)" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "*** This was a PREVIEW - no changes were made ***" -ForegroundColor Yellow
+    } else {
+        Write-Host "Results saved to: $outputPath" -ForegroundColor Green
+        Write-Host "Total operations: $($results.Count)" -ForegroundColor Cyan
+        Write-Host "Successful: $(($results | Where-Object {$_.Status -eq 'Success'}).Count)" -ForegroundColor Green
+        Write-Host "Failed: $(($results | Where-Object {$_.Status -eq 'Failed'}).Count)" -ForegroundColor Red
+    }
 }
 
 # ============================================================================
@@ -1472,65 +1695,148 @@ function Invoke-BulkUpdateLocation {
         [string]$SiteURL,
         [string]$Token,
         [string]$ObjectType,  # "Processes", "Documents", or "Both"
-        [string]$CsvPath
+        [string]$CsvPath,
+        [switch]$WhatIf
     )
 
     Write-Host "`n========================================" -ForegroundColor Cyan
-    Write-Host "BULK UPDATE LOCATION OPERATION" -ForegroundColor Cyan
-    Write-Host "========================================" -ForegroundColor Cyan
+    if ($WhatIf) {
+        Write-Host "BULK UPDATE LOCATION OPERATION (DRY-RUN PREVIEW)" -ForegroundColor Yellow
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "*** PREVIEW MODE: No changes will be made ***" -ForegroundColor Yellow
+    } else {
+        Write-Host "BULK UPDATE LOCATION OPERATION" -ForegroundColor Cyan
+        Write-Host "========================================" -ForegroundColor Cyan
+    }
     Write-Host "CSV should contain: ID column and NewGroupID column" -ForegroundColor Yellow
 
     $csv = Read-CsvWithFlexibleHeaders -Path $CsvPath
     if (-not $csv) { return }
 
+    # Pre-flight validation: Check that all target groups exist
+    Write-Host "`nValidating target groups..." -ForegroundColor Cyan
+    $uniqueGroupIds = @()
+    foreach ($row in $csv) {
+        $groupId = Get-NewGroupIdFromCsvRow -Row $row
+        if ($groupId -and $uniqueGroupIds -notcontains $groupId) {
+            $uniqueGroupIds += $groupId
+        }
+    }
+
+    Write-Host "Found $($uniqueGroupIds.Count) unique target group(s) to validate" -ForegroundColor Gray
+    $invalidGroups = @()
+    $validatedGroups = @{}  # Cache validated groups
+
+    foreach ($groupId in $uniqueGroupIds) {
+        # Try to lookup the group
+        $group = Get-ProcessGroupById -SiteURL $SiteURL -Token $Token -GroupId $groupId
+
+        if ($group) {
+            $validatedGroups[$groupId] = $group
+            Write-Host "  ✓ Group $groupId exists: $($group.name)" -ForegroundColor Green
+        } else {
+            $invalidGroups += $groupId
+            Write-Host "  ✗ Group $groupId not found" -ForegroundColor Red
+        }
+    }
+
+    if ($invalidGroups.Count -gt 0) {
+        Write-Host "`nWarning: $($invalidGroups.Count) target group(s) not found:" -ForegroundColor Yellow
+        foreach ($invalidGroup in $invalidGroups) {
+            Write-Host "  - $invalidGroup" -ForegroundColor Yellow
+        }
+        Write-Host ""
+        $continue = Read-Host "Continue anyway? Rows with invalid groups will fail. (Y/N)"
+        if ($continue -ne 'Y') {
+            Write-Host "Operation cancelled" -ForegroundColor Yellow
+            return
+        }
+    } else {
+        Write-Host "All target groups validated successfully" -ForegroundColor Green
+    }
+
     $results = @()
+    $currentIndex = 0
+    $totalRows = $csv.Count
+
+    if ($WhatIf) {
+        Write-Host "`n[PREVIEW] Checking $totalRows rows..." -ForegroundColor Yellow
+    } else {
+        Write-Host "`nProcessing $totalRows rows..." -ForegroundColor Cyan
+    }
 
     foreach ($row in $csv) {
+        $currentIndex++
+        if ($WhatIf) {
+            Write-Host "`r  [PREVIEW] Checking row $currentIndex of $totalRows..." -NoNewline -ForegroundColor Yellow
+        } else {
+            Write-Host "`r  Processing row $currentIndex of $totalRows..." -NoNewline -ForegroundColor Gray
+        }
+
         $objectId = Get-IdFromCsvRow -Row $row
         $newGroupId = Get-NewGroupIdFromCsvRow -Row $row
 
         if (-not $objectId -or -not $newGroupId) {
-            Write-Host "Skipping row - missing ID or NewGroupID" -ForegroundColor Yellow
+            $results += [PSCustomObject]@{
+                ObjectType = "Unknown"
+                ObjectID = "N/A"
+                Operation = "UpdateLocation"
+                Status = "Skipped"
+                Message = "Missing ID or NewGroupID"
+                ActionUrl = ""
+            }
             continue
         }
 
         if ($ObjectType -eq "Processes" -or $ObjectType -eq "Both") {
-            Write-Host "Moving Process $objectId to Group $newGroupId" -ForegroundColor White
 
             # Get current process
             $getUrl = "$SiteURL/Api/v1/Processes/$objectId"
             $process = Invoke-ApiGet -Url $getUrl -Token $Token
 
             if ($process) {
-                # Update process group
-                $process.processGroupId = [int]$newGroupId
+                if ($WhatIf) {
+                    # Dry-run: Show what would happen
+                    $processName = if ($process.name) { $process.name } else { "Unknown" }
+                    $currentGroupId = if ($process.processGroupId) { $process.processGroupId } else { "Unknown" }
+                    $targetGroupName = if ($validatedGroups[$newGroupId]) { $validatedGroups[$newGroupId].name } else { $newGroupId }
 
-                $updateUrl = "$SiteURL/Api/v1/Processes/$objectId"
-                $updateResult = Invoke-ApiPut -Url $updateUrl -Token $Token -Body $process
-
-                if ($updateResult -and $updateResult.Success) {
-                    Write-Host "  Success: Process moved" -ForegroundColor Green
                     $results += [PSCustomObject]@{
                         ObjectType = "Process"
                         ObjectID = $objectId
                         Operation = "UpdateLocation"
-                        Status = "Success"
-                        Message = "Moved to Group $newGroupId"
+                        Status = "Preview"
+                        Message = "Would move '$processName' from Group $currentGroupId to $targetGroupName"
                         ActionUrl = "$SiteURL/Process/View/$objectId"
                     }
                 } else {
-                    Write-Host "  Failed: Could not update process" -ForegroundColor Red
-                    $results += [PSCustomObject]@{
-                        ObjectType = "Process"
-                        ObjectID = $objectId
-                        Operation = "UpdateLocation"
-                        Status = "Failed"
-                        Message = "Update failed"
-                        ActionUrl = ""
+                    # Actual operation
+                    $process.processGroupId = [int]$newGroupId
+
+                    $updateUrl = "$SiteURL/Api/v1/Processes/$objectId"
+                    $updateResult = Invoke-ApiPut -Url $updateUrl -Token $Token -Body $process
+
+                    if ($updateResult -and $updateResult.Success) {
+                        $results += [PSCustomObject]@{
+                            ObjectType = "Process"
+                            ObjectID = $objectId
+                            Operation = "UpdateLocation"
+                            Status = "Success"
+                            Message = "Moved to Group $newGroupId"
+                            ActionUrl = "$SiteURL/Process/View/$objectId"
+                        }
+                    } else {
+                        $results += [PSCustomObject]@{
+                            ObjectType = "Process"
+                            ObjectID = $objectId
+                            Operation = "UpdateLocation"
+                            Status = "Failed"
+                            Message = "Update failed"
+                            ActionUrl = ""
+                        }
                     }
                 }
             } else {
-                Write-Host "  Failed: Could not retrieve process" -ForegroundColor Red
                 $results += [PSCustomObject]@{
                     ObjectType = "Process"
                     ObjectID = $objectId
@@ -1543,7 +1849,6 @@ function Invoke-BulkUpdateLocation {
         }
 
         if ($ObjectType -eq "Documents" -or $ObjectType -eq "Both") {
-            Write-Host "Moving Document $objectId to Group $newGroupId - Not fully implemented" -ForegroundColor Yellow
             $results += [PSCustomObject]@{
                 ObjectType = "Document"
                 ObjectID = $objectId
@@ -1554,16 +1859,32 @@ function Invoke-BulkUpdateLocation {
             }
         }
     }
+    Write-Host ""  # New line after progress counter
 
     # Save results
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $outputPath = "UpdateLocation_Results_$timestamp.csv"
+    if ($WhatIf) {
+        $outputPath = "UpdateLocation_Preview_$timestamp.csv"
+    } else {
+        $outputPath = "UpdateLocation_Results_$timestamp.csv"
+    }
     $results | Export-Csv -Path $outputPath -NoTypeInformation
 
-    Write-Host "`nResults saved to: $outputPath" -ForegroundColor Green
-    Write-Host "Total operations: $($results.Count)" -ForegroundColor Cyan
-    Write-Host "Successful: $(($results | Where-Object {$_.Status -eq 'Success'}).Count)" -ForegroundColor Green
-    Write-Host "Failed: $(($results | Where-Object {$_.Status -eq 'Failed'}).Count)" -ForegroundColor Red
+    Write-Host ""
+    if ($WhatIf) {
+        Write-Host "Preview results saved to: $outputPath" -ForegroundColor Yellow
+        Write-Host "Total items checked: $($results.Count)" -ForegroundColor Cyan
+        Write-Host "Would update location: $(($results | Where-Object {$_.Status -eq 'Preview'}).Count)" -ForegroundColor Yellow
+        Write-Host "Skipped: $(($results | Where-Object {$_.Status -eq 'Skipped'}).Count)" -ForegroundColor Gray
+        Write-Host "Failed to check: $(($results | Where-Object {$_.Status -eq 'Failed'}).Count)" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "*** This was a PREVIEW - no changes were made ***" -ForegroundColor Yellow
+    } else {
+        Write-Host "Results saved to: $outputPath" -ForegroundColor Green
+        Write-Host "Total operations: $($results.Count)" -ForegroundColor Cyan
+        Write-Host "Successful: $(($results | Where-Object {$_.Status -eq 'Success'}).Count)" -ForegroundColor Green
+        Write-Host "Failed: $(($results | Where-Object {$_.Status -eq 'Failed'}).Count)" -ForegroundColor Red
+    }
 }
 
 # ============================================================================
@@ -1574,89 +1895,198 @@ function Invoke-BulkUpdateOwnership {
     param(
         [string]$SiteURL,
         [string]$Token,
-        [string]$CsvPath
+        [string]$CsvPath,
+        [switch]$WhatIf
     )
 
     Write-Host "`n========================================" -ForegroundColor Cyan
-    Write-Host "BULK UPDATE OWNERSHIP OPERATION" -ForegroundColor Cyan
-    Write-Host "========================================" -ForegroundColor Cyan
+    if ($WhatIf) {
+        Write-Host "BULK UPDATE OWNERSHIP OPERATION (DRY-RUN PREVIEW)" -ForegroundColor Yellow
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "*** PREVIEW MODE: No changes will be made ***" -ForegroundColor Yellow
+    } else {
+        Write-Host "BULK UPDATE OWNERSHIP OPERATION" -ForegroundColor Cyan
+        Write-Host "========================================" -ForegroundColor Cyan
+    }
     Write-Host "CSV should contain: ProcessID, NewOwner (username), NewExpert (username)" -ForegroundColor Yellow
     Write-Host "Note: Currently supports Processes only" -ForegroundColor Yellow
 
     $csv = Read-CsvWithFlexibleHeaders -Path $CsvPath
     if (-not $csv) { return }
 
-    $results = @()
+    # Pre-flight validation: Check that all users exist
+    Write-Host "`nValidating users..." -ForegroundColor Cyan
+    $uniqueOwners = @()
+    $uniqueExperts = @()
 
     foreach ($row in $csv) {
+        $owner = Get-NewOwnerFromCsvRow -Row $row
+        $expert = Get-NewExpertFromCsvRow -Row $row
+
+        if ($owner -and $uniqueOwners -notcontains $owner) {
+            $uniqueOwners += $owner
+        }
+        if ($expert -and $uniqueExperts -notcontains $expert) {
+            $uniqueExperts += $expert
+        }
+    }
+
+    $allUniqueUsers = ($uniqueOwners + $uniqueExperts) | Select-Object -Unique
+    Write-Host "Found $($allUniqueUsers.Count) unique user(s) to validate" -ForegroundColor Gray
+
+    $invalidUsers = @()
+    $validatedUsers = @{}  # Cache validated users
+
+    foreach ($username in $allUniqueUsers) {
+        # Search for the user
+        $users = Search-User -SiteURL $SiteURL -Token $Token -SearchTerm $username
+
+        # Check if exact match exists
+        $exactMatch = $users | Where-Object { $_.value -eq $username }
+
+        if ($exactMatch) {
+            $validatedUsers[$username] = $exactMatch
+            Write-Host "  ✓ User '$username' exists: $($exactMatch.label)" -ForegroundColor Green
+        } else {
+            $invalidUsers += $username
+            Write-Host "  ✗ User '$username' not found" -ForegroundColor Red
+        }
+    }
+
+    if ($invalidUsers.Count -gt 0) {
+        Write-Host "`nWarning: $($invalidUsers.Count) user(s) not found:" -ForegroundColor Yellow
+        foreach ($invalidUser in $invalidUsers) {
+            Write-Host "  - $invalidUser" -ForegroundColor Yellow
+        }
+        Write-Host ""
+        $continue = Read-Host "Continue anyway? Rows with invalid users may fail. (Y/N)"
+        if ($continue -ne 'Y') {
+            Write-Host "Operation cancelled" -ForegroundColor Yellow
+            return
+        }
+    } else {
+        Write-Host "All users validated successfully" -ForegroundColor Green
+    }
+
+    $results = @()
+    $currentIndex = 0
+    $totalRows = $csv.Count
+
+    if ($WhatIf) {
+        Write-Host "`n[PREVIEW] Checking $totalRows rows..." -ForegroundColor Yellow
+    } else {
+        Write-Host "`nProcessing $totalRows rows..." -ForegroundColor Cyan
+    }
+
+    foreach ($row in $csv) {
+        $currentIndex++
+        if ($WhatIf) {
+            Write-Host "`r  [PREVIEW] Checking row $currentIndex of $totalRows..." -NoNewline -ForegroundColor Yellow
+        } else {
+            Write-Host "`r  Processing row $currentIndex of $totalRows..." -NoNewline -ForegroundColor Gray
+        }
+
         $processId = Get-IdFromCsvRow -Row $row
         $newOwner = Get-NewOwnerFromCsvRow -Row $row
         $newExpert = Get-NewExpertFromCsvRow -Row $row
 
         if (-not $processId) {
-            Write-Host "Skipping row - missing ProcessID" -ForegroundColor Yellow
+            $results += [PSCustomObject]@{
+                ObjectType = "Process"
+                ObjectID = "N/A"
+                Operation = "UpdateOwnership"
+                Status = "Skipped"
+                Message = "Missing ProcessID"
+                ActionUrl = ""
+            }
             continue
         }
-
-        Write-Host "Updating Process $processId - Owner: $newOwner, Expert: $newExpert" -ForegroundColor White
 
         # Get current process
         $getUrl = "$SiteURL/Api/v1/Processes/$processId"
         $process = Invoke-ApiGet -Url $getUrl -Token $Token
 
         if ($process) {
-            $updated = $false
+            if ($WhatIf) {
+                # Dry-run: Show what would happen
+                $processName = if ($process.name) { $process.name } else { "Unknown" }
+                $currentOwner = if ($process.owner) { $process.owner } else { "None" }
+                $currentExpert = if ($process.expert) { $process.expert } else { "None" }
 
-            # Update owner if provided
-            if ($newOwner) {
-                $process.owner = $newOwner
-                $updated = $true
-            }
+                $changes = @()
+                if ($newOwner) { $changes += "Owner: $currentOwner → $newOwner" }
+                if ($newExpert) { $changes += "Expert: $currentExpert → $newExpert" }
 
-            # Update expert if provided
-            if ($newExpert) {
-                $process.expert = $newExpert
-                $updated = $true
-            }
-
-            if ($updated) {
-                $updateUrl = "$SiteURL/Api/v1/Processes/$processId"
-                $updateResult = Invoke-ApiPut -Url $updateUrl -Token $Token -Body $process
-
-                if ($updateResult -and $updateResult.Success) {
-                    Write-Host "  Success: Ownership updated" -ForegroundColor Green
+                if ($changes.Count -gt 0) {
                     $results += [PSCustomObject]@{
                         ObjectType = "Process"
                         ObjectID = $processId
                         Operation = "UpdateOwnership"
-                        Status = "Success"
-                        Message = "Owner: $newOwner, Expert: $newExpert"
+                        Status = "Preview"
+                        Message = "Would update '$processName' - $($changes -join ', ')"
                         ActionUrl = "$SiteURL/Process/View/$processId"
                     }
                 } else {
-                    Write-Host "  Failed: Could not update process" -ForegroundColor Red
                     $results += [PSCustomObject]@{
                         ObjectType = "Process"
                         ObjectID = $processId
                         Operation = "UpdateOwnership"
-                        Status = "Failed"
-                        Message = "Update failed"
+                        Status = "Skipped"
+                        Message = "No updates provided"
                         ActionUrl = ""
                     }
                 }
             } else {
-                Write-Host "  Skipped: No owner or expert provided" -ForegroundColor Yellow
-                $results += [PSCustomObject]@{
-                    ObjectType = "Process"
-                    ObjectID = $processId
-                    Operation = "UpdateOwnership"
-                    Status = "Skipped"
-                    Message = "No updates provided"
-                    ActionUrl = ""
+                # Actual operation
+                $updated = $false
+
+                # Update owner if provided
+                if ($newOwner) {
+                    $process.owner = $newOwner
+                    $updated = $true
+                }
+
+                # Update expert if provided
+                if ($newExpert) {
+                    $process.expert = $newExpert
+                    $updated = $true
+                }
+
+                if ($updated) {
+                    $updateUrl = "$SiteURL/Api/v1/Processes/$processId"
+                    $updateResult = Invoke-ApiPut -Url $updateUrl -Token $Token -Body $process
+
+                    if ($updateResult -and $updateResult.Success) {
+                        $results += [PSCustomObject]@{
+                            ObjectType = "Process"
+                            ObjectID = $processId
+                            Operation = "UpdateOwnership"
+                            Status = "Success"
+                            Message = "Owner: $newOwner, Expert: $newExpert"
+                            ActionUrl = "$SiteURL/Process/View/$processId"
+                        }
+                    } else {
+                        $results += [PSCustomObject]@{
+                            ObjectType = "Process"
+                            ObjectID = $processId
+                            Operation = "UpdateOwnership"
+                            Status = "Failed"
+                            Message = "Update failed"
+                            ActionUrl = ""
+                        }
+                    }
+                } else {
+                    $results += [PSCustomObject]@{
+                        ObjectType = "Process"
+                        ObjectID = $processId
+                        Operation = "UpdateOwnership"
+                        Status = "Skipped"
+                        Message = "No updates provided"
+                        ActionUrl = ""
+                    }
                 }
             }
         } else {
-            Write-Host "  Failed: Could not retrieve process" -ForegroundColor Red
             $results += [PSCustomObject]@{
                 ObjectType = "Process"
                 ObjectID = $processId
@@ -1667,16 +2097,32 @@ function Invoke-BulkUpdateOwnership {
             }
         }
     }
+    Write-Host ""  # New line after progress counter
 
     # Save results
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $outputPath = "UpdateOwnership_Results_$timestamp.csv"
+    if ($WhatIf) {
+        $outputPath = "UpdateOwnership_Preview_$timestamp.csv"
+    } else {
+        $outputPath = "UpdateOwnership_Results_$timestamp.csv"
+    }
     $results | Export-Csv -Path $outputPath -NoTypeInformation
 
-    Write-Host "`nResults saved to: $outputPath" -ForegroundColor Green
-    Write-Host "Total operations: $($results.Count)" -ForegroundColor Cyan
-    Write-Host "Successful: $(($results | Where-Object {$_.Status -eq 'Success'}).Count)" -ForegroundColor Green
-    Write-Host "Failed: $(($results | Where-Object {$_.Status -eq 'Failed'}).Count)" -ForegroundColor Red
+    Write-Host ""
+    if ($WhatIf) {
+        Write-Host "Preview results saved to: $outputPath" -ForegroundColor Yellow
+        Write-Host "Total items checked: $($results.Count)" -ForegroundColor Cyan
+        Write-Host "Would update ownership: $(($results | Where-Object {$_.Status -eq 'Preview'}).Count)" -ForegroundColor Yellow
+        Write-Host "Skipped: $(($results | Where-Object {$_.Status -eq 'Skipped'}).Count)" -ForegroundColor Gray
+        Write-Host "Failed to check: $(($results | Where-Object {$_.Status -eq 'Failed'}).Count)" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "*** This was a PREVIEW - no changes were made ***" -ForegroundColor Yellow
+    } else {
+        Write-Host "Results saved to: $outputPath" -ForegroundColor Green
+        Write-Host "Total operations: $($results.Count)" -ForegroundColor Cyan
+        Write-Host "Successful: $(($results | Where-Object {$_.Status -eq 'Success'}).Count)" -ForegroundColor Green
+        Write-Host "Failed: $(($results | Where-Object {$_.Status -eq 'Failed'}).Count)" -ForegroundColor Red
+    }
 }
 
 # ============================================================================
@@ -2410,25 +2856,35 @@ function Invoke-BulkDeleteProcesses {
         [int]$GroupID = -1,
         [string]$GroupUniqueId = "",
         [string]$TempGroupName = "Bulk Delete Temporary Group",
-        [string]$CurrentUsername
+        [string]$CurrentUsername,
+        [switch]$WhatIf
     )
 
     Write-Host "`n========================================" -ForegroundColor Cyan
-    Write-Host "BULK DELETE PROCESSES OPERATION" -ForegroundColor Cyan
-    Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host "WARNING: This is a destructive operation!" -ForegroundColor Red
-    Write-Host "This will permanently delete processes after removing references." -ForegroundColor Red
-
-    # Ask about process approvals
-    $approvalsEnabled = (Read-Host "Are process approvals enabled in your environment? (Y/N)") -eq 'Y'
-    if ($approvalsEnabled) {
-        Write-Host "Process approvals are enabled - this will be considered during dependency removal" -ForegroundColor Yellow
+    if ($WhatIf) {
+        Write-Host "BULK DELETE PROCESSES OPERATION (DRY-RUN PREVIEW)" -ForegroundColor Yellow
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "*** PREVIEW MODE: No changes will be made ***" -ForegroundColor Yellow
+        Write-Host "This preview will show what processes would be deleted." -ForegroundColor Yellow
+    } else {
+        Write-Host "BULK DELETE PROCESSES OPERATION" -ForegroundColor Cyan
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "WARNING: This is a destructive operation!" -ForegroundColor Red
+        Write-Host "This will permanently delete processes after removing references." -ForegroundColor Red
     }
 
-    $confirm = Read-Host "Type 'DELETE' to confirm you want to proceed"
-    if ($confirm -ne 'DELETE') {
-        Write-Host "Operation cancelled" -ForegroundColor Yellow
-        return
+    # Ask about process approvals (skip in preview mode)
+    if (-not $WhatIf) {
+        $approvalsEnabled = (Read-Host "Are process approvals enabled in your environment? (Y/N)") -eq 'Y'
+        if ($approvalsEnabled) {
+            Write-Host "Process approvals are enabled - this will be considered during dependency removal" -ForegroundColor Yellow
+        }
+
+        $confirm = Read-Host "Type 'DELETE' to confirm you want to proceed"
+        if ($confirm -ne 'DELETE') {
+            Write-Host "Operation cancelled" -ForegroundColor Yellow
+            return
+        }
     }
 
     $results = @()
@@ -2535,6 +2991,94 @@ function Invoke-BulkDeleteProcesses {
         }
     }
     Write-Host ""  # New line after progress counter
+
+    # PREVIEW MODE: Exit early with summary
+    if ($WhatIf) {
+        Write-Host ""
+        Write-Host "=== PREVIEW SUMMARY ===" -ForegroundColor Yellow
+        Write-Host "Total processes that would be deleted: $($processDeleteMap.Keys.Count)" -ForegroundColor Cyan
+
+        # Generate preview results
+        foreach ($processKey in $processDeleteMap.Keys) {
+            $processInfo = $processDeleteMap[$processKey]
+            $results += [PSCustomObject]@{
+                ObjectType = "Process"
+                ObjectID = $processInfo.NumericId
+                ProcessUniqueId = $processInfo.UniqueId
+                GroupUniqueId = $processInfo.GroupUniqueId
+                Operation = "Delete"
+                Status = "Preview"
+                Message = "Would be deleted (after dependency removal, archiving, etc.)"
+            }
+        }
+
+        # Add document previews if applicable
+        if ($documentsToDelete.Count -gt 0) {
+            Write-Host "Total documents that would be deleted: $($documentsToDelete.Count)" -ForegroundColor Cyan
+
+            foreach ($doc in $documentsToDelete) {
+                $results += [PSCustomObject]@{
+                    ObjectType = "Document"
+                    ObjectID = $doc.id
+                    ProcessUniqueId = ""
+                    GroupUniqueId = ""
+                    Operation = "Delete"
+                    Status = "Preview"
+                    Message = "Would be deleted"
+                }
+            }
+        }
+
+        # Preview: Show groups that could be deleted (if Group source type)
+        if ($SourceType -eq "Group" -and $GroupUniqueId) {
+            Write-Host ""
+            Write-Host "=== OPTIONAL GROUP DELETION ===" -ForegroundColor Yellow
+            Write-Host "If you choose to delete group folders after process/document deletion:" -ForegroundColor Cyan
+
+            $groupsToDelete = Get-GroupsInTree -SiteURL $SiteURL -Token $Token -RootGroupUniqueId $GroupUniqueId -IncludeRoot
+
+            if ($groupsToDelete.Count -gt 0) {
+                Write-Host "The following $($groupsToDelete.Count) group(s) would be deleted (bottom to top):" -ForegroundColor Cyan
+                foreach ($grp in $groupsToDelete) {
+                    $indent = "  " * $grp.Depth
+                    Write-Host "$indent- $($grp.Name) (Depth: $($grp.Depth))" -ForegroundColor Gray
+
+                    $results += [PSCustomObject]@{
+                        ObjectType = "ProcessGroup (Optional)"
+                        ObjectID = $grp.UniqueId
+                        ProcessUniqueId = ""
+                        GroupUniqueId = $grp.UniqueId
+                        Operation = "Delete"
+                        Status = "Preview"
+                        Message = "Would be deleted if group cleanup is selected (Depth: $($grp.Depth), Name: $($grp.Name))"
+                    }
+                }
+            }
+        }
+
+        # Save preview results
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        $outputPath = "Delete_Preview_$timestamp.csv"
+        $results | Export-Csv -Path $outputPath -NoTypeInformation
+
+        Write-Host ""
+        Write-Host "Preview results saved to: $outputPath" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "NOTE: This preview shows what would be deleted." -ForegroundColor Yellow
+        Write-Host "The actual delete operation includes:" -ForegroundColor Yellow
+        Write-Host "  - Checking and removing all process dependencies" -ForegroundColor Gray
+        Write-Host "  - Creating temporary group for dependency restoration" -ForegroundColor Gray
+        Write-Host "  - Changing ownership to current user" -ForegroundColor Gray
+        Write-Host "  - Archiving all processes" -ForegroundColor Gray
+        Write-Host "  - Permanent deletion" -ForegroundColor Gray
+        Write-Host "  - Cleanup of temporary groups" -ForegroundColor Gray
+        if ($SourceType -eq "Group") {
+            Write-Host "  - Optional: Delete process group folders (you will be prompted)" -ForegroundColor Gray
+        }
+        Write-Host ""
+        Write-Host "*** This was a PREVIEW - no changes were made ***" -ForegroundColor Yellow
+        return
+    }
 
     # Step 2: Check dependencies for each process (active and archived)
     Write-Host "`n=== PHASE 2: Checking Dependencies ===" -ForegroundColor Cyan
@@ -3176,6 +3720,78 @@ function Invoke-BulkDeleteProcesses {
         }
     }
 
+    # Optional: Delete the source group folders (only for Group source type)
+    if ($SourceType -eq "Group" -and $GroupUniqueId) {
+        Write-Host "`n=== OPTIONAL: Process Group Cleanup ===" -ForegroundColor Cyan
+        Write-Host "All processes and documents have been deleted from the selected group." -ForegroundColor White
+        Write-Host ""
+        $deleteGroups = Read-Host "Do you also want to delete the process group folders themselves? (Y/N)"
+
+        if ($deleteGroups -eq 'Y' -or $deleteGroups -eq 'y') {
+            Write-Host "`nRetrieving group hierarchy..." -ForegroundColor Cyan
+
+            # Get all groups in the tree (sorted by depth, deepest first)
+            $groupsToDelete = Get-GroupsInTree -SiteURL $SiteURL -Token $Token -RootGroupUniqueId $GroupUniqueId -IncludeRoot
+
+            if ($groupsToDelete.Count -gt 0) {
+                Write-Host "Found $($groupsToDelete.Count) group(s) to delete:" -ForegroundColor Yellow
+                foreach ($grp in $groupsToDelete) {
+                    $indent = "  " * $grp.Depth
+                    Write-Host "$indent- $($grp.Name) (Depth: $($grp.Depth))" -ForegroundColor Gray
+                }
+
+                Write-Host "`nDeleting groups from bottom to top (children before parents)..." -ForegroundColor Cyan
+                $groupDeleteCount = 0
+                $groupDeleteFailCount = 0
+                $currentIndex = 0
+                $totalGroups = $groupsToDelete.Count
+
+                foreach ($grp in $groupsToDelete) {
+                    $currentIndex++
+                    Write-Host "`r  Deleting group $currentIndex of $totalGroups..." -NoNewline -ForegroundColor Gray
+
+                    $deleteSuccess = Delete-ProcessGroup -SiteURL $SiteURL -Token $Token -GroupUniqueId $grp.UniqueId -Silent
+
+                    if ($deleteSuccess) {
+                        $groupDeleteCount++
+                        $results += [PSCustomObject]@{
+                            ObjectType = "ProcessGroup"
+                            ObjectID = $grp.UniqueId
+                            Name = $grp.Name
+                            Operation = "Delete"
+                            Status = "Success"
+                            Message = "Group deleted (Depth: $($grp.Depth))"
+                        }
+                    } else {
+                        $groupDeleteFailCount++
+                        $results += [PSCustomObject]@{
+                            ObjectType = "ProcessGroup"
+                            ObjectID = $grp.UniqueId
+                            Name = $grp.Name
+                            Operation = "Delete"
+                            Status = "Failed"
+                            Message = "Failed to delete group (Depth: $($grp.Depth))"
+                        }
+                    }
+                }
+                Write-Host ""  # New line after progress counter
+
+                Write-Host "`nGroup deletion complete:" -ForegroundColor Green
+                Write-Host "  Successfully deleted: $groupDeleteCount" -ForegroundColor Green
+                Write-Host "  Failed: $groupDeleteFailCount" -ForegroundColor Red
+
+                if ($groupDeleteFailCount -gt 0) {
+                    Write-Host "`nNote: Some groups may have failed to delete if they still contain content" -ForegroundColor Yellow
+                    Write-Host "or if there were permissions issues. Check the results CSV for details." -ForegroundColor Yellow
+                }
+            } else {
+                Write-Host "No groups found to delete." -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "Skipping group folder deletion." -ForegroundColor Yellow
+        }
+    }
+
     # Save results
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
     $outputPath = "Delete_Results_$timestamp.csv"
@@ -3266,6 +3882,15 @@ function Get-ObjectType {
     }
 }
 
+function Get-DryRunChoice {
+    Write-Host "`nExecution Mode:" -ForegroundColor Yellow
+    Write-Host "  [1] Execute Operation (make changes)" -ForegroundColor White
+    Write-Host "  [2] Preview/Dry-Run (no changes, show what would happen)" -ForegroundColor Cyan
+    $choice = Read-Host "Choice"
+
+    return ($choice -eq '2')
+}
+
 # ============================================================================
 # MAIN SCRIPT
 # ============================================================================
@@ -3276,7 +3901,7 @@ Clear-Host
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  NINTEX PROCESS MANAGER BULK OPERATIONS" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  Version 2.7 (Progress Counters)" -ForegroundColor Yellow
+Write-Host "  Version 3.0 (Dry-Run Preview Mode)" -ForegroundColor Yellow
 Write-Host "  Script loaded: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Yellow
 Write-Host ""
 
@@ -3304,14 +3929,23 @@ while ($running) {
         '1' {  # Bulk Archive
             $sourceType = Get-SourceType -Mode 1
             $objectType = Get-ObjectType -Mode 1
+            $isDryRun = Get-DryRunChoice
 
             if ($sourceType -eq "CSV") {
                 $csvPath = Read-Host "Enter CSV file path"
-                Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -CsvPath $csvPath
+                if ($isDryRun) {
+                    Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -CsvPath $csvPath -WhatIf
+                } else {
+                    Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -CsvPath $csvPath
+                }
             } else {
                 $group = Select-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Group to Archive"
                 if ($group) {
-                    Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -GroupID $group.id -GroupUniqueId $group.uniqueId
+                    if ($isDryRun) {
+                        Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -GroupID $group.id -GroupUniqueId $group.uniqueId -WhatIf
+                    } else {
+                        Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -GroupID $group.id -GroupUniqueId $group.uniqueId
+                    }
                 }
             }
         }
@@ -3319,6 +3953,7 @@ while ($running) {
         '2' {  # Bulk Restore
             $sourceType = Get-SourceType -Mode 2
             $objectType = Get-ObjectType -Mode 2
+            $isDryRun = Get-DryRunChoice
 
             # Get restore target group
             $restoreGroupId = -1
@@ -3339,9 +3974,17 @@ while ($running) {
             if ($restoreGroupId -gt 0) {
                 if ($sourceType -eq "CSV") {
                     $csvPath = Read-Host "Enter CSV file path"
-                    Invoke-BulkRestore -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -CsvPath $csvPath -RestoreGroupID $restoreGroupId
+                    if ($isDryRun) {
+                        Invoke-BulkRestore -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -CsvPath $csvPath -RestoreGroupID $restoreGroupId -WhatIf
+                    } else {
+                        Invoke-BulkRestore -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -CsvPath $csvPath -RestoreGroupID $restoreGroupId
+                    }
                 } else {
-                    Invoke-BulkRestore -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -RestoreGroupID $restoreGroupId
+                    if ($isDryRun) {
+                        Invoke-BulkRestore -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -RestoreGroupID $restoreGroupId -WhatIf
+                    } else {
+                        Invoke-BulkRestore -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -RestoreGroupID $restoreGroupId
+                    }
                 }
             }
         }
@@ -3349,16 +3992,27 @@ while ($running) {
         '3' {  # Bulk Update Location
             $objectType = Get-ObjectType -Mode 3
             $csvPath = Read-Host "Enter CSV file path (must contain ID and NewGroupID columns)"
-            Invoke-BulkUpdateLocation -SiteURL $config.SiteURL -Token $token -ObjectType $objectType -CsvPath $csvPath
+            $isDryRun = Get-DryRunChoice
+            if ($isDryRun) {
+                Invoke-BulkUpdateLocation -SiteURL $config.SiteURL -Token $token -ObjectType $objectType -CsvPath $csvPath -WhatIf
+            } else {
+                Invoke-BulkUpdateLocation -SiteURL $config.SiteURL -Token $token -ObjectType $objectType -CsvPath $csvPath
+            }
         }
 
         '4' {  # Bulk Update Ownership
             $csvPath = Read-Host "Enter CSV file path (must contain ProcessID, NewOwner, NewExpert columns)"
-            Invoke-BulkUpdateOwnership -SiteURL $config.SiteURL -Token $token -CsvPath $csvPath
+            $isDryRun = Get-DryRunChoice
+            if ($isDryRun) {
+                Invoke-BulkUpdateOwnership -SiteURL $config.SiteURL -Token $token -CsvPath $csvPath -WhatIf
+            } else {
+                Invoke-BulkUpdateOwnership -SiteURL $config.SiteURL -Token $token -CsvPath $csvPath
+            }
         }
 
         '5' {  # Bulk Delete Content
             $sourceType = Get-SourceType -Mode 5
+            $isDryRun = Get-DryRunChoice
 
             $tempGroupName = $config.TempGroupName
             if (-not $tempGroupName) {
@@ -3367,11 +4021,19 @@ while ($running) {
 
             if ($sourceType -eq "CSV") {
                 $csvPath = Read-Host "Enter CSV file path"
-                Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -CsvPath $csvPath -TempGroupName $tempGroupName -CurrentUsername $config.Username
+                if ($isDryRun) {
+                    Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -CsvPath $csvPath -TempGroupName $tempGroupName -CurrentUsername $config.Username -WhatIf
+                } else {
+                    Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -CsvPath $csvPath -TempGroupName $tempGroupName -CurrentUsername $config.Username
+                }
             } else {
                 $group = Select-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Group to Delete (WARNING: Destructive!)"
                 if ($group) {
-                    Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -GroupID $group.id -GroupUniqueId $group.uniqueId -TempGroupName $tempGroupName -CurrentUsername $config.Username
+                    if ($isDryRun) {
+                        Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -GroupID $group.id -GroupUniqueId $group.uniqueId -TempGroupName $tempGroupName -CurrentUsername $config.Username -WhatIf
+                    } else {
+                        Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -GroupID $group.id -GroupUniqueId $group.uniqueId -TempGroupName $tempGroupName -CurrentUsername $config.Username
+                    }
                 }
             }
         }
