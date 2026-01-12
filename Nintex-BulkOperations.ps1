@@ -2524,10 +2524,17 @@ function Remove-ProcessLinksFromJson {
     $processObj = $ProcessJson | ConvertFrom-Json
 
     $linksRemoved = 0
+    $processIdsToRemove = @()  # Track ProcessIds to remove from LinkedStakeholders
 
     # Remove from ProcessProcedures.ProcessLink
     if ($processObj.ProcessProcedures.ProcessLink) {
         $originalCount = @($processObj.ProcessProcedures.ProcessLink).Count
+        # Track which ProcessIds we're removing
+        foreach ($link in $processObj.ProcessProcedures.ProcessLink) {
+            if ($link.LinkedProcessUniqueId -eq $TargetProcessUniqueId -and $link.LinkedProcessId) {
+                $processIdsToRemove += $link.LinkedProcessId
+            }
+        }
         $processObj.ProcessProcedures.ProcessLink = @($processObj.ProcessProcedures.ProcessLink | Where-Object {
             $_.LinkedProcessUniqueId -ne $TargetProcessUniqueId
         })
@@ -2535,17 +2542,30 @@ function Remove-ProcessLinksFromJson {
         $linksRemoved += ($originalCount - $newCount)
     }
 
-    # Remove from LinkedStakeholders
-    if ($processObj.LinkedStakeholders.LinkedStakeholder) {
-        $originalCount = @($processObj.LinkedStakeholders.LinkedStakeholder).Count
-        # Need to get the ProcessId for the target UniqueId - we'll filter by matching the link
-        # This is a bit tricky since we only have UniqueId, but LinkedStakeholder doesn't store UniqueId
-        # We'll need to handle this carefully
-        $processObj.LinkedStakeholders.LinkedStakeholder = @($processObj.LinkedStakeholders.LinkedStakeholder | Where-Object {
-            # We can't directly filter by UniqueId here, so we'll keep all for now
-            # The API will clean this up when we remove the actual links
-            $true
+    # Remove from ProcessProcedures.OrphanProcessLink
+    if ($processObj.ProcessProcedures.OrphanProcessLink) {
+        $originalCount = @($processObj.ProcessProcedures.OrphanProcessLink).Count
+        # Track which ProcessIds we're removing
+        foreach ($link in $processObj.ProcessProcedures.OrphanProcessLink) {
+            if ($link.LinkedProcessUniqueId -eq $TargetProcessUniqueId -and $link.LinkedProcessId) {
+                $processIdsToRemove += $link.LinkedProcessId
+            }
+        }
+        $processObj.ProcessProcedures.OrphanProcessLink = @($processObj.ProcessProcedures.OrphanProcessLink | Where-Object {
+            $_.LinkedProcessUniqueId -ne $TargetProcessUniqueId
         })
+        $newCount = @($processObj.ProcessProcedures.OrphanProcessLink).Count
+        $linksRemoved += ($originalCount - $newCount)
+    }
+
+    # Remove from LinkedStakeholders using the ProcessIds we collected
+    if ($processObj.LinkedStakeholders.LinkedStakeholder -and $processIdsToRemove.Count -gt 0) {
+        $originalCount = @($processObj.LinkedStakeholders.LinkedStakeholder).Count
+        $processObj.LinkedStakeholders.LinkedStakeholder = @($processObj.LinkedStakeholders.LinkedStakeholder | Where-Object {
+            $processIdsToRemove -notcontains $_.ProcessId
+        })
+        $newCount = @($processObj.LinkedStakeholders.LinkedStakeholder).Count
+        # Don't count these in linksRemoved as they're just stakeholder entries, not actual links
     }
 
     # Recursively clean ChildProcessProcedures in Activities
@@ -2559,6 +2579,10 @@ function Remove-ProcessLinksFromJson {
                     if ($activity.ChildProcessProcedures.$childType) {
                         foreach ($child in $activity.ChildProcessProcedures.$childType) {
                             if ($child.LinkedProcessUniqueId -eq $TargetProcessUniqueId) {
+                                # Track ProcessId for LinkedStakeholders removal
+                                if ($child.LinkedProcessId) {
+                                    $processIdsToRemove += $child.LinkedProcessId
+                                }
                                 # Clear the linked process fields
                                 $child.LinkedProcessId = $null
                                 $child.LinkedProcessUniqueId = $null
@@ -2580,6 +2604,10 @@ function Remove-ProcessLinksFromJson {
     if ($processObj.ProcessProcedures.Decision) {
         foreach ($decision in $processObj.ProcessProcedures.Decision) {
             if ($decision.LinkedProcessUniqueId -eq $TargetProcessUniqueId) {
+                # Track ProcessId for LinkedStakeholders removal
+                if ($decision.LinkedProcessId) {
+                    $processIdsToRemove += $decision.LinkedProcessId
+                }
                 # Clear the linked process fields
                 $decision.LinkedProcessId = $null
                 $decision.LinkedProcessUniqueId = $null
