@@ -1,5 +1,5 @@
 # Nintex Process Manager Bulk Operations Script
-# Version 2.8 (Optimized Group Lookup)
+# Version 2.9 (Progress Indicators & Pre-flight Validation)
 # Supports: Archive, Restore, Update Location, Update Ownership, and Delete operations
 
 #Requires -Version 5.1
@@ -1493,6 +1493,48 @@ function Invoke-BulkUpdateLocation {
     $csv = Read-CsvWithFlexibleHeaders -Path $CsvPath
     if (-not $csv) { return }
 
+    # Pre-flight validation: Check that all target groups exist
+    Write-Host "`nValidating target groups..." -ForegroundColor Cyan
+    $uniqueGroupIds = @()
+    foreach ($row in $csv) {
+        $groupId = Get-NewGroupIdFromCsvRow -Row $row
+        if ($groupId -and $uniqueGroupIds -notcontains $groupId) {
+            $uniqueGroupIds += $groupId
+        }
+    }
+
+    Write-Host "Found $($uniqueGroupIds.Count) unique target group(s) to validate" -ForegroundColor Gray
+    $invalidGroups = @()
+    $validatedGroups = @{}  # Cache validated groups
+
+    foreach ($groupId in $uniqueGroupIds) {
+        # Try to lookup the group
+        $group = Get-ProcessGroupById -SiteURL $SiteURL -Token $Token -GroupId $groupId
+
+        if ($group) {
+            $validatedGroups[$groupId] = $group
+            Write-Host "  ✓ Group $groupId exists: $($group.name)" -ForegroundColor Green
+        } else {
+            $invalidGroups += $groupId
+            Write-Host "  ✗ Group $groupId not found" -ForegroundColor Red
+        }
+    }
+
+    if ($invalidGroups.Count -gt 0) {
+        Write-Host "`nWarning: $($invalidGroups.Count) target group(s) not found:" -ForegroundColor Yellow
+        foreach ($invalidGroup in $invalidGroups) {
+            Write-Host "  - $invalidGroup" -ForegroundColor Yellow
+        }
+        Write-Host ""
+        $continue = Read-Host "Continue anyway? Rows with invalid groups will fail. (Y/N)"
+        if ($continue -ne 'Y') {
+            Write-Host "Operation cancelled" -ForegroundColor Yellow
+            return
+        }
+    } else {
+        Write-Host "All target groups validated successfully" -ForegroundColor Green
+    }
+
     $results = @()
     $currentIndex = 0
     $totalRows = $csv.Count
@@ -1605,6 +1647,60 @@ function Invoke-BulkUpdateOwnership {
 
     $csv = Read-CsvWithFlexibleHeaders -Path $CsvPath
     if (-not $csv) { return }
+
+    # Pre-flight validation: Check that all users exist
+    Write-Host "`nValidating users..." -ForegroundColor Cyan
+    $uniqueOwners = @()
+    $uniqueExperts = @()
+
+    foreach ($row in $csv) {
+        $owner = Get-NewOwnerFromCsvRow -Row $row
+        $expert = Get-NewExpertFromCsvRow -Row $row
+
+        if ($owner -and $uniqueOwners -notcontains $owner) {
+            $uniqueOwners += $owner
+        }
+        if ($expert -and $uniqueExperts -notcontains $expert) {
+            $uniqueExperts += $expert
+        }
+    }
+
+    $allUniqueUsers = ($uniqueOwners + $uniqueExperts) | Select-Object -Unique
+    Write-Host "Found $($allUniqueUsers.Count) unique user(s) to validate" -ForegroundColor Gray
+
+    $invalidUsers = @()
+    $validatedUsers = @{}  # Cache validated users
+
+    foreach ($username in $allUniqueUsers) {
+        # Search for the user
+        $users = Search-User -SiteURL $SiteURL -Token $Token -SearchTerm $username
+
+        # Check if exact match exists
+        $exactMatch = $users | Where-Object { $_.value -eq $username }
+
+        if ($exactMatch) {
+            $validatedUsers[$username] = $exactMatch
+            Write-Host "  ✓ User '$username' exists: $($exactMatch.label)" -ForegroundColor Green
+        } else {
+            $invalidUsers += $username
+            Write-Host "  ✗ User '$username' not found" -ForegroundColor Red
+        }
+    }
+
+    if ($invalidUsers.Count -gt 0) {
+        Write-Host "`nWarning: $($invalidUsers.Count) user(s) not found:" -ForegroundColor Yellow
+        foreach ($invalidUser in $invalidUsers) {
+            Write-Host "  - $invalidUser" -ForegroundColor Yellow
+        }
+        Write-Host ""
+        $continue = Read-Host "Continue anyway? Rows with invalid users may fail. (Y/N)"
+        if ($continue -ne 'Y') {
+            Write-Host "Operation cancelled" -ForegroundColor Yellow
+            return
+        }
+    } else {
+        Write-Host "All users validated successfully" -ForegroundColor Green
+    }
 
     $results = @()
     $currentIndex = 0
