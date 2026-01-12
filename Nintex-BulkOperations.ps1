@@ -167,6 +167,23 @@ function Invoke-ApiPut {
 
         $jsonBody = $Body | ConvertTo-Json -Depth 10
 
+        # DEBUG: Log the request details
+        Write-Host "`n=== DEBUG: PUT Request Details ===" -ForegroundColor Magenta
+        Write-Host "URL: $Url" -ForegroundColor Cyan
+        Write-Host "Headers:" -ForegroundColor Cyan
+        $headers.GetEnumerator() | ForEach-Object { Write-Host "  $($_.Key): $($_.Value)" -ForegroundColor Gray }
+        Write-Host "`nBody (first 2000 chars):" -ForegroundColor Cyan
+        $bodyPreview = if ($jsonBody.Length -gt 2000) { $jsonBody.Substring(0, 2000) + "..." } else { $jsonBody }
+        Write-Host $bodyPreview -ForegroundColor Gray
+        Write-Host "`nBody Length: $($jsonBody.Length) characters" -ForegroundColor Cyan
+
+        # Save full body to file for Postman testing
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss_fff"
+        $debugFile = "DEBUG_PUT_Request_$timestamp.json"
+        $jsonBody | Out-File -FilePath $debugFile -Encoding UTF8
+        Write-Host "Full body saved to: $debugFile" -ForegroundColor Yellow
+        Write-Host "=================================`n" -ForegroundColor Magenta
+
         # Invoke-RestMethod throws on HTTP errors, so if this succeeds, we got a 2xx response
         # No -StatusCodeVariable needed (not available in PowerShell 5.1)
         $response = Invoke-RestMethod -Uri $Url -Method Put -Headers $headers -Body $jsonBody -ErrorAction Stop
@@ -2472,10 +2489,10 @@ function Get-ActiveProcessDependencies {
     $hasMore = $true
 
     # Step 1: Fetch all active processes with pagination
-    # ListType=1 is for active processes (ListType=7 is archived)
+    # ListType=0 is for all active processes (ListType=7 is archived)
     while ($hasMore) {
         try {
-            $listUrl = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$pageSize&ListType=1"
+            $listUrl = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$pageSize&ListType=0"
             $response = Invoke-ApiGet -Url $listUrl -Token $Token
 
             if ($response -and $response.items -and $response.items.Count -gt 0) {
