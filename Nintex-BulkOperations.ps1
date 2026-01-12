@@ -662,19 +662,38 @@ function Get-ProcessGroupById {
             $directUrl = "$SiteURL/Api/v1/ProcessGroups/$GroupId"
             $directResponse = Invoke-ApiGet -Url $directUrl -Token $Token
 
-            if ($directResponse -and $directResponse.processGroupJson) {
-                $groupJson = $directResponse.processGroupJson
-                Write-Host "Found group: $($groupJson.Name)" -ForegroundColor Green
+            # Check multiple possible response structures
+            if ($directResponse) {
+                $groupJson = $null
 
-                return @{
-                    id = $groupJson.Id
-                    uniqueId = $groupJson.UniqueId
-                    name = $groupJson.Name
+                # Try different response structures
+                if ($directResponse.processGroupJson) {
+                    $groupJson = $directResponse.processGroupJson
+                }
+                elseif ($directResponse.id -or $directResponse.Id) {
+                    # Response might be the group object directly
+                    $groupJson = $directResponse
+                }
+                elseif ($directResponse.ProcessGroup) {
+                    $groupJson = $directResponse.ProcessGroup
+                }
+
+                if ($groupJson -and ($groupJson.UniqueId -or $groupJson.uniqueId)) {
+                    $name = if ($groupJson.Name) { $groupJson.Name } else { $groupJson.name }
+                    $id = if ($groupJson.Id) { $groupJson.Id } else { $groupJson.id }
+                    $uniqueId = if ($groupJson.UniqueId) { $groupJson.UniqueId } else { $groupJson.uniqueId }
+
+                    Write-Host "Found group: $name" -ForegroundColor Green
+
+                    return @{
+                        id = $id
+                        uniqueId = $uniqueId
+                        name = $name
+                    }
                 }
             }
 
-            # Fallback: Search the tree for the group
-            Write-Host "  Direct API lookup failed, searching group tree..." -ForegroundColor Gray
+            # Fallback: Search the tree for the group (silently, since this is a normal fallback)
             $numericId = Get-GroupNumericIdFromTree -SiteURL $SiteURL -Token $Token -TargetUniqueId $GroupId
 
             if ($numericId -and $numericId -ne -1) {
@@ -1102,7 +1121,8 @@ function Get-GroupsInTree {
     Write-Host "  Total groups to delete (including root): $($groupsInTree.Count)" -ForegroundColor Gray
 
     # Sort by depth descending (deepest first) so we delete children before parents
-    $groupsInTree = $groupsInTree | Sort-Object -Property Depth -Descending
+    # Use @() to ensure we always return an array (PowerShell unwraps single-element arrays from Sort-Object)
+    $groupsInTree = @($groupsInTree | Sort-Object -Property Depth -Descending)
 
     return $groupsInTree
 }
@@ -2495,10 +2515,17 @@ function Remove-ProcessLinksFromJson {
     $processObj = $ProcessJson | ConvertFrom-Json
 
     $linksRemoved = 0
+    $processIdsToRemove = @()  # Track ProcessIds to remove from LinkedStakeholders
 
     # Remove from ProcessProcedures.ProcessLink
     if ($processObj.ProcessProcedures.ProcessLink) {
         $originalCount = @($processObj.ProcessProcedures.ProcessLink).Count
+        # Track which ProcessIds we're removing
+        foreach ($link in $processObj.ProcessProcedures.ProcessLink) {
+            if ($link.LinkedProcessUniqueId -eq $TargetProcessUniqueId -and $link.LinkedProcessId) {
+                $processIdsToRemove += $link.LinkedProcessId
+            }
+        }
         $processObj.ProcessProcedures.ProcessLink = @($processObj.ProcessProcedures.ProcessLink | Where-Object {
             $_.LinkedProcessUniqueId -ne $TargetProcessUniqueId
         })
@@ -2506,17 +2533,20 @@ function Remove-ProcessLinksFromJson {
         $linksRemoved += ($originalCount - $newCount)
     }
 
-    # Remove from LinkedStakeholders
-    if ($processObj.LinkedStakeholders.LinkedStakeholder) {
-        $originalCount = @($processObj.LinkedStakeholders.LinkedStakeholder).Count
-        # Need to get the ProcessId for the target UniqueId - we'll filter by matching the link
-        # This is a bit tricky since we only have UniqueId, but LinkedStakeholder doesn't store UniqueId
-        # We'll need to handle this carefully
-        $processObj.LinkedStakeholders.LinkedStakeholder = @($processObj.LinkedStakeholders.LinkedStakeholder | Where-Object {
-            # We can't directly filter by UniqueId here, so we'll keep all for now
-            # The API will clean this up when we remove the actual links
-            $true
+    # Remove from ProcessProcedures.OrphanProcessLink
+    if ($processObj.ProcessProcedures.OrphanProcessLink) {
+        $originalCount = @($processObj.ProcessProcedures.OrphanProcessLink).Count
+        # Track which ProcessIds we're removing
+        foreach ($link in $processObj.ProcessProcedures.OrphanProcessLink) {
+            if ($link.LinkedProcessUniqueId -eq $TargetProcessUniqueId -and $link.LinkedProcessId) {
+                $processIdsToRemove += $link.LinkedProcessId
+            }
+        }
+        $processObj.ProcessProcedures.OrphanProcessLink = @($processObj.ProcessProcedures.OrphanProcessLink | Where-Object {
+            $_.LinkedProcessUniqueId -ne $TargetProcessUniqueId
         })
+        $newCount = @($processObj.ProcessProcedures.OrphanProcessLink).Count
+        $linksRemoved += ($originalCount - $newCount)
     }
 
     # Recursively clean ChildProcessProcedures in Activities
@@ -2530,6 +2560,10 @@ function Remove-ProcessLinksFromJson {
                     if ($activity.ChildProcessProcedures.$childType) {
                         foreach ($child in $activity.ChildProcessProcedures.$childType) {
                             if ($child.LinkedProcessUniqueId -eq $TargetProcessUniqueId) {
+                                # Track ProcessId for LinkedStakeholders removal
+                                if ($child.LinkedProcessId) {
+                                    $processIdsToRemove += $child.LinkedProcessId
+                                }
                                 # Clear the linked process fields
                                 $child.LinkedProcessId = $null
                                 $child.LinkedProcessUniqueId = $null
@@ -2551,6 +2585,10 @@ function Remove-ProcessLinksFromJson {
     if ($processObj.ProcessProcedures.Decision) {
         foreach ($decision in $processObj.ProcessProcedures.Decision) {
             if ($decision.LinkedProcessUniqueId -eq $TargetProcessUniqueId) {
+                # Track ProcessId for LinkedStakeholders removal
+                if ($decision.LinkedProcessId) {
+                    $processIdsToRemove += $decision.LinkedProcessId
+                }
                 # Clear the linked process fields
                 $decision.LinkedProcessId = $null
                 $decision.LinkedProcessUniqueId = $null
@@ -2562,6 +2600,17 @@ function Remove-ProcessLinksFromJson {
                 $linksRemoved++
             }
         }
+    }
+
+    # Remove from LinkedStakeholders using ALL the ProcessIds we collected
+    # This must happen AFTER we've processed all link types above
+    if ($processObj.LinkedStakeholders.LinkedStakeholder -and $processIdsToRemove.Count -gt 0) {
+        $originalCount = @($processObj.LinkedStakeholders.LinkedStakeholder).Count
+        $processObj.LinkedStakeholders.LinkedStakeholder = @($processObj.LinkedStakeholders.LinkedStakeholder | Where-Object {
+            $processIdsToRemove -notcontains $_.ProcessId
+        })
+        $newCount = @($processObj.LinkedStakeholders.LinkedStakeholder).Count
+        # Don't count these in linksRemoved as they're just stakeholder entries, not actual links
     }
 
     # Convert back to JSON string
@@ -3033,7 +3082,7 @@ function Invoke-BulkDeleteProcesses {
     if ($processesToDelete.Count -gt 0) {
         Write-Host "`n=== Getting Process Details ===" -ForegroundColor Cyan
 
-    $processDeleteMap = @{}  # Maps any ID to object with {NumericId, UniqueId, GroupUniqueId}
+    $processDeleteMap = @{}  # Maps any ID to object with {NumericId, UniqueId, GroupUniqueId, Name}
 
     # Special handling for archived processes - use mobile API endpoint
     if ($SourceType -eq "Archived") {
@@ -3063,6 +3112,7 @@ function Invoke-BulkDeleteProcesses {
                             NumericId = $model.Id
                             UniqueId = $model.UniqueId
                             GroupUniqueId = $model.GroupUniqueId
+                            Name = $model.Name
                         }
                     }
                 }
@@ -3096,6 +3146,7 @@ function Invoke-BulkDeleteProcesses {
                         NumericId = $numericId
                         UniqueId = $processId
                         GroupUniqueId = $groupUniqueId
+                        Name = $processStatus.Name
                     }
                 } else {
                     Write-Host "`n  Warning: Could not retrieve process details for UniqueId $processId" -ForegroundColor Yellow
@@ -3116,6 +3167,7 @@ function Invoke-BulkDeleteProcesses {
                         NumericId = $processId
                         UniqueId = $process.uniqueId
                         GroupUniqueId = $groupUniqueId
+                        Name = if ($processStatus) { $processStatus.Name } else { $null }
                     }
                     Write-Host "  Process ID $processId -> UniqueId: $($process.uniqueId), GroupUniqueId: $groupUniqueId" -ForegroundColor Gray
                 } else {
