@@ -2766,25 +2766,35 @@ function Invoke-BulkDeleteProcesses {
         [int]$GroupID = -1,
         [string]$GroupUniqueId = "",
         [string]$TempGroupName = "Bulk Delete Temporary Group",
-        [string]$CurrentUsername
+        [string]$CurrentUsername,
+        [switch]$WhatIf
     )
 
     Write-Host "`n========================================" -ForegroundColor Cyan
-    Write-Host "BULK DELETE PROCESSES OPERATION" -ForegroundColor Cyan
-    Write-Host "========================================" -ForegroundColor Cyan
-    Write-Host "WARNING: This is a destructive operation!" -ForegroundColor Red
-    Write-Host "This will permanently delete processes after removing references." -ForegroundColor Red
-
-    # Ask about process approvals
-    $approvalsEnabled = (Read-Host "Are process approvals enabled in your environment? (Y/N)") -eq 'Y'
-    if ($approvalsEnabled) {
-        Write-Host "Process approvals are enabled - this will be considered during dependency removal" -ForegroundColor Yellow
+    if ($WhatIf) {
+        Write-Host "BULK DELETE PROCESSES OPERATION (DRY-RUN PREVIEW)" -ForegroundColor Yellow
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "*** PREVIEW MODE: No changes will be made ***" -ForegroundColor Yellow
+        Write-Host "This preview will show what processes would be deleted." -ForegroundColor Yellow
+    } else {
+        Write-Host "BULK DELETE PROCESSES OPERATION" -ForegroundColor Cyan
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "WARNING: This is a destructive operation!" -ForegroundColor Red
+        Write-Host "This will permanently delete processes after removing references." -ForegroundColor Red
     }
 
-    $confirm = Read-Host "Type 'DELETE' to confirm you want to proceed"
-    if ($confirm -ne 'DELETE') {
-        Write-Host "Operation cancelled" -ForegroundColor Yellow
-        return
+    # Ask about process approvals (skip in preview mode)
+    if (-not $WhatIf) {
+        $approvalsEnabled = (Read-Host "Are process approvals enabled in your environment? (Y/N)") -eq 'Y'
+        if ($approvalsEnabled) {
+            Write-Host "Process approvals are enabled - this will be considered during dependency removal" -ForegroundColor Yellow
+        }
+
+        $confirm = Read-Host "Type 'DELETE' to confirm you want to proceed"
+        if ($confirm -ne 'DELETE') {
+            Write-Host "Operation cancelled" -ForegroundColor Yellow
+            return
+        }
     }
 
     $results = @()
@@ -2891,6 +2901,64 @@ function Invoke-BulkDeleteProcesses {
         }
     }
     Write-Host ""  # New line after progress counter
+
+    # PREVIEW MODE: Exit early with summary
+    if ($WhatIf) {
+        Write-Host ""
+        Write-Host "=== PREVIEW SUMMARY ===" -ForegroundColor Yellow
+        Write-Host "Total processes that would be deleted: $($processDeleteMap.Keys.Count)" -ForegroundColor Cyan
+
+        # Generate preview results
+        foreach ($processKey in $processDeleteMap.Keys) {
+            $processInfo = $processDeleteMap[$processKey]
+            $results += [PSCustomObject]@{
+                ObjectType = "Process"
+                ObjectID = $processInfo.NumericId
+                ProcessUniqueId = $processInfo.UniqueId
+                GroupUniqueId = $processInfo.GroupUniqueId
+                Operation = "Delete"
+                Status = "Preview"
+                Message = "Would be deleted (after dependency removal, archiving, etc.)"
+            }
+        }
+
+        # Add document previews if applicable
+        if ($documentsToDelete.Count -gt 0) {
+            Write-Host "Total documents that would be deleted: $($documentsToDelete.Count)" -ForegroundColor Cyan
+
+            foreach ($doc in $documentsToDelete) {
+                $results += [PSCustomObject]@{
+                    ObjectType = "Document"
+                    ObjectID = $doc.id
+                    ProcessUniqueId = ""
+                    GroupUniqueId = ""
+                    Operation = "Delete"
+                    Status = "Preview"
+                    Message = "Would be deleted"
+                }
+            }
+        }
+
+        # Save preview results
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        $outputPath = "Delete_Preview_$timestamp.csv"
+        $results | Export-Csv -Path $outputPath -NoTypeInformation
+
+        Write-Host ""
+        Write-Host "Preview results saved to: $outputPath" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "NOTE: This preview shows what would be deleted." -ForegroundColor Yellow
+        Write-Host "The actual delete operation includes:" -ForegroundColor Yellow
+        Write-Host "  - Checking and removing all process dependencies" -ForegroundColor Gray
+        Write-Host "  - Creating temporary group for dependency restoration" -ForegroundColor Gray
+        Write-Host "  - Changing ownership to current user" -ForegroundColor Gray
+        Write-Host "  - Archiving all processes" -ForegroundColor Gray
+        Write-Host "  - Permanent deletion" -ForegroundColor Gray
+        Write-Host "  - Cleanup of temporary groups" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "*** This was a PREVIEW - no changes were made ***" -ForegroundColor Yellow
+        return
+    }
 
     # Step 2: Check dependencies for each process (active and archived)
     Write-Host "`n=== PHASE 2: Checking Dependencies ===" -ForegroundColor Cyan
