@@ -1184,12 +1184,19 @@ function Invoke-BulkArchive {
         [string]$ObjectType,  # "Processes", "Documents", or "Both"
         [string]$CsvPath = "",
         [int]$GroupID = -1,
-        [string]$GroupUniqueId = ""
+        [string]$GroupUniqueId = "",
+        [switch]$WhatIf
     )
 
     Write-Host "`n========================================" -ForegroundColor Cyan
-    Write-Host "BULK ARCHIVE OPERATION" -ForegroundColor Cyan
-    Write-Host "========================================" -ForegroundColor Cyan
+    if ($WhatIf) {
+        Write-Host "BULK ARCHIVE OPERATION (DRY-RUN PREVIEW)" -ForegroundColor Yellow
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "*** PREVIEW MODE: No changes will be made ***" -ForegroundColor Yellow
+    } else {
+        Write-Host "BULK ARCHIVE OPERATION" -ForegroundColor Cyan
+        Write-Host "========================================" -ForegroundColor Cyan
+    }
 
     $results = @()
     $processesToArchive = @()
@@ -1230,14 +1237,22 @@ function Invoke-BulkArchive {
 
     # Archive processes
     if ($processesToArchive.Count -gt 0) {
-        Write-Host "`nArchiving $($processesToArchive.Count) processes..." -ForegroundColor Cyan
+        if ($WhatIf) {
+            Write-Host "`n[PREVIEW] Would archive $($processesToArchive.Count) processes..." -ForegroundColor Yellow
+        } else {
+            Write-Host "`nArchiving $($processesToArchive.Count) processes..." -ForegroundColor Cyan
+        }
 
         $currentIndex = 0
         $totalProcesses = $processesToArchive.Count
 
         foreach ($processId in $processesToArchive) {
             $currentIndex++
-            Write-Host "`r  Archiving Process $currentIndex of $totalProcesses..." -NoNewline -ForegroundColor Gray
+            if ($WhatIf) {
+                Write-Host "`r  [PREVIEW] Checking Process $currentIndex of $totalProcesses..." -NoNewline -ForegroundColor Yellow
+            } else {
+                Write-Host "`r  Archiving Process $currentIndex of $totalProcesses..." -NoNewline -ForegroundColor Gray
+            }
 
             # Fetch process details to get uniqueId
             $verifyUrl = "$SiteURL/Api/v1/Processes/$processId"
@@ -1246,19 +1261,41 @@ function Invoke-BulkArchive {
             if ($process -and $process.uniqueId) {
                 $processUniqueId = $process.uniqueId
 
-                # Use Archive-Process helper
-                $result = Archive-Process -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId -Comment "Bulk archive operation"
+                if ($WhatIf) {
+                    # Dry-run: Show what would happen
+                    $processName = if ($process.name) { $process.name } else { "Unknown" }
+                    $archiveStatus = if ($process.isArchived) { "Already Archived" } else { "Would Archive" }
 
-                if ($result) {
-                    # Verify archive
-                    $process = Invoke-ApiGet -Url $verifyUrl -Token $Token
-                    if ($process -and $process.isArchived) {
-                        $results += [PSCustomObject]@{
-                            ObjectType = "Process"
-                            ObjectID = $processId
-                            Operation = "Archive"
-                            Status = "Success"
-                            Message = "Archived successfully"
+                    $results += [PSCustomObject]@{
+                        ObjectType = "Process"
+                        ObjectID = $processId
+                        Operation = "Archive"
+                        Status = "Preview"
+                        Message = "$archiveStatus - $processName"
+                    }
+                } else {
+                    # Actual operation
+                    $result = Archive-Process -SiteURL $SiteURL -Token $Token -ProcessUniqueId $processUniqueId -Comment "Bulk archive operation"
+
+                    if ($result) {
+                        # Verify archive
+                        $process = Invoke-ApiGet -Url $verifyUrl -Token $Token
+                        if ($process -and $process.isArchived) {
+                            $results += [PSCustomObject]@{
+                                ObjectType = "Process"
+                                ObjectID = $processId
+                                Operation = "Archive"
+                                Status = "Success"
+                                Message = "Archived successfully"
+                            }
+                        } else {
+                            $results += [PSCustomObject]@{
+                                ObjectType = "Process"
+                                ObjectID = $processId
+                                Operation = "Archive"
+                                Status = "Failed"
+                                Message = "Could not archive"
+                            }
                         }
                     } else {
                         $results += [PSCustomObject]@{
@@ -1266,16 +1303,8 @@ function Invoke-BulkArchive {
                             ObjectID = $processId
                             Operation = "Archive"
                             Status = "Failed"
-                            Message = "Could not archive"
+                            Message = "Archive API call failed"
                         }
-                    }
-                } else {
-                    $results += [PSCustomObject]@{
-                        ObjectType = "Process"
-                        ObjectID = $processId
-                        Operation = "Archive"
-                        Status = "Failed"
-                        Message = "Archive API call failed"
                     }
                 }
             } else {
@@ -1293,7 +1322,11 @@ function Invoke-BulkArchive {
 
     # Archive documents (if applicable)
     if ($documentsToArchive.Count -gt 0) {
-        Write-Host "`nArchiving $($documentsToArchive.Count) documents..." -ForegroundColor Cyan
+        if ($WhatIf) {
+            Write-Host "`n[PREVIEW] Would archive $($documentsToArchive.Count) documents..." -ForegroundColor Yellow
+        } else {
+            Write-Host "`nArchiving $($documentsToArchive.Count) documents..." -ForegroundColor Cyan
+        }
         Write-Host "Note: Document archiving may not be supported in all Nintex PM versions" -ForegroundColor Yellow
 
         $currentIndex = 0
@@ -1301,27 +1334,42 @@ function Invoke-BulkArchive {
 
         foreach ($docId in $documentsToArchive) {
             $currentIndex++
-            Write-Host "`r  Archiving Document $currentIndex of $totalDocuments..." -NoNewline -ForegroundColor Gray
+            if ($WhatIf) {
+                Write-Host "`r  [PREVIEW] Checking Document $currentIndex of $totalDocuments..." -NoNewline -ForegroundColor Yellow
+            } else {
+                Write-Host "`r  Archiving Document $currentIndex of $totalDocuments..." -NoNewline -ForegroundColor Gray
+            }
 
-            # Adjust endpoint based on your version
-            $archiveUrl = "$SiteURL/Api/v1/Documents/$docId/Archive"
-            $result = Invoke-ApiPost -Url $archiveUrl -Token $Token
-
-            if ($result) {
+            if ($WhatIf) {
+                # Dry-run: Preview
                 $results += [PSCustomObject]@{
                     ObjectType = "Document"
                     ObjectID = $docId
                     Operation = "Archive"
-                    Status = "Success"
-                    Message = "Archived"
+                    Status = "Preview"
+                    Message = "Would Archive"
                 }
             } else {
-                $results += [PSCustomObject]@{
-                    ObjectType = "Document"
-                    ObjectID = $docId
-                    Operation = "Archive"
-                    Status = "Failed"
-                    Message = "Archive failed"
+                # Actual operation
+                $archiveUrl = "$SiteURL/Api/v1/Documents/$docId/Archive"
+                $result = Invoke-ApiPost -Url $archiveUrl -Token $Token
+
+                if ($result) {
+                    $results += [PSCustomObject]@{
+                        ObjectType = "Document"
+                        ObjectID = $docId
+                        Operation = "Archive"
+                        Status = "Success"
+                        Message = "Archived"
+                    }
+                } else {
+                    $results += [PSCustomObject]@{
+                        ObjectType = "Document"
+                        ObjectID = $docId
+                        Operation = "Archive"
+                        Status = "Failed"
+                        Message = "Archive failed"
+                    }
                 }
             }
         }
@@ -1330,13 +1378,28 @@ function Invoke-BulkArchive {
 
     # Save results
     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $outputPath = "Archive_Results_$timestamp.csv"
+    if ($WhatIf) {
+        $outputPath = "Archive_Preview_$timestamp.csv"
+    } else {
+        $outputPath = "Archive_Results_$timestamp.csv"
+    }
     $results | Export-Csv -Path $outputPath -NoTypeInformation
 
-    Write-Host "`nResults saved to: $outputPath" -ForegroundColor Green
-    Write-Host "Total operations: $($results.Count)" -ForegroundColor Cyan
-    Write-Host "Successful: $(($results | Where-Object {$_.Status -eq 'Success'}).Count)" -ForegroundColor Green
-    Write-Host "Failed: $(($results | Where-Object {$_.Status -eq 'Failed'}).Count)" -ForegroundColor Red
+    Write-Host ""
+    if ($WhatIf) {
+        Write-Host "Preview results saved to: $outputPath" -ForegroundColor Yellow
+        Write-Host "Total items checked: $($results.Count)" -ForegroundColor Cyan
+        Write-Host "Would archive: $(($results | Where-Object {$_.Status -eq 'Preview' -and $_.Message -like 'Would Archive*'}).Count)" -ForegroundColor Yellow
+        Write-Host "Already archived: $(($results | Where-Object {$_.Status -eq 'Preview' -and $_.Message -like 'Already Archived*'}).Count)" -ForegroundColor Gray
+        Write-Host "Failed to check: $(($results | Where-Object {$_.Status -eq 'Failed'}).Count)" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "*** This was a PREVIEW - no changes were made ***" -ForegroundColor Yellow
+    } else {
+        Write-Host "Results saved to: $outputPath" -ForegroundColor Green
+        Write-Host "Total operations: $($results.Count)" -ForegroundColor Cyan
+        Write-Host "Successful: $(($results | Where-Object {$_.Status -eq 'Success'}).Count)" -ForegroundColor Green
+        Write-Host "Failed: $(($results | Where-Object {$_.Status -eq 'Failed'}).Count)" -ForegroundColor Red
+    }
 }
 
 # ============================================================================
