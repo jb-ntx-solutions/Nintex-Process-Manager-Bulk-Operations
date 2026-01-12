@@ -1131,7 +1131,8 @@ function Get-GroupsInTree {
     Write-Host "  Total groups to delete (including root): $($groupsInTree.Count)" -ForegroundColor Gray
 
     # Sort by depth descending (deepest first) so we delete children before parents
-    $groupsInTree = $groupsInTree | Sort-Object -Property Depth -Descending
+    # Use @() to ensure we always return an array (PowerShell unwraps single-element arrays from Sort-Object)
+    $groupsInTree = @($groupsInTree | Sort-Object -Property Depth -Descending)
 
     return $groupsInTree
 }
