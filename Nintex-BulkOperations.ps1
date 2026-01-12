@@ -662,15 +662,6 @@ function Get-ProcessGroupById {
             $directUrl = "$SiteURL/Api/v1/ProcessGroups/$GroupId"
             $directResponse = Invoke-ApiGet -Url $directUrl -Token $Token
 
-            # DEBUG: Log what we received
-            if ($directResponse) {
-                Write-Host "  DEBUG: Received response from API" -ForegroundColor DarkGray
-                Write-Host "  DEBUG: Response type: $($directResponse.GetType().Name)" -ForegroundColor DarkGray
-                Write-Host "  DEBUG: Response properties: $($directResponse.PSObject.Properties.Name -join ', ')" -ForegroundColor DarkGray
-            } else {
-                Write-Host "  DEBUG: No response from $directUrl" -ForegroundColor DarkGray
-            }
-
             # Check multiple possible response structures
             if ($directResponse) {
                 $groupJson = $null
@@ -702,8 +693,7 @@ function Get-ProcessGroupById {
                 }
             }
 
-            # Fallback: Search the tree for the group
-            Write-Host "  Direct API lookup failed, searching group tree..." -ForegroundColor Gray
+            # Fallback: Search the tree for the group (silently, since this is a normal fallback)
             $numericId = Get-GroupNumericIdFromTree -SiteURL $SiteURL -Token $Token -TargetUniqueId $GroupId
 
             if ($numericId -and $numericId -ne -1) {
