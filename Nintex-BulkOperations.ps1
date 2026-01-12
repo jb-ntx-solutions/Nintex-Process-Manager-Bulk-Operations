@@ -2391,12 +2391,11 @@ function Get-ArchivedProcessDependencies {
         [hashtable]$ProcessDeleteMap
     )
 
-    Write-Host "  Fetching list of archived processes..." -ForegroundColor Gray
-
     $archivedDependencies = @()
     $page = 1
     $pageSize = 20
     $hasMore = $true
+    $totalProcessesChecked = 0
 
     # Step 1: Fetch all archived processes with pagination
     while ($hasMore) {
@@ -2405,12 +2404,15 @@ function Get-ArchivedProcessDependencies {
             $response = Invoke-ApiGet -Url $listUrl -Token $Token
 
             if ($response -and $response.items -and $response.items.Count -gt 0) {
-                Write-Host "  Page $page : Found $($response.items.Count) archived processes" -ForegroundColor Gray
+                # Update progress indicator (single line)
+                Write-Host "`r  Scanning archived processes... Page $page ($($response.items.Count) processes)" -NoNewline -ForegroundColor Gray
 
                 # Collect UniqueIds for batch fetching
                 $uniqueIds = $response.items | ForEach-Object { $_.processUniqueId }
 
-                # Step 2: Batch fetch archived process details (10-20 per batch for efficiency)
+                # Step 2: Batch fetch archived process details using mobile API
+                # NOTE: For ARCHIVED processes, use the mobile API with batch fetching
+                #       /mobile/api/v1/processes?processUniqueIds={guid1}&processUniqueIds={guid2}
                 $batchSize = 15
                 for ($i = 0; $i -lt $uniqueIds.Count; $i += $batchSize) {
                     $batch = $uniqueIds[$i..[Math]::Min($i + $batchSize - 1, $uniqueIds.Count - 1)]
@@ -2425,6 +2427,7 @@ function Get-ArchivedProcessDependencies {
                         if ($batchResponse -and $batchResponse.data -and $batchResponse.data.Count -gt 0) {
                             # Step 3: Search each archived process for links to processes being deleted
                             foreach ($archivedProcess in $batchResponse.data) {
+                                $totalProcessesChecked++
                                 $archivedUniqueId = $archivedProcess.ProcessModel.UniqueId
                                 $archivedName = $archivedProcess.ProcessModel.Name
                                 $archivedProcessJson = $archivedProcess.ProcessModel | ConvertTo-Json -Depth 20 -Compress
@@ -2435,6 +2438,8 @@ function Get-ArchivedProcessDependencies {
                                     $targetUniqueId = $processInfo.UniqueId
 
                                     if (Find-ProcessLinksInJson -ProcessJson $archivedProcessJson -TargetProcessUniqueId $targetUniqueId) {
+                                        # Show on new line when dependency found
+                                        Write-Host ""
                                         Write-Host "    Found: $archivedName has link to process $targetUniqueId" -ForegroundColor Yellow
 
                                         # Add to dependencies list
@@ -2445,13 +2450,19 @@ function Get-ArchivedProcessDependencies {
                                             ReferencedProcessKey = $processKey
                                             IsArchived = $true
                                         }
+
+                                        # Resume progress indicator
+                                        Write-Host "`r  Scanning archived processes... Page $page ($totalProcessesChecked processes checked)" -NoNewline -ForegroundColor Gray
                                     }
                                 }
                             }
                         }
                     }
                     catch {
+                        Write-Host ""  # New line before error
                         Write-Host "  Warning: Failed to fetch batch of archived processes: $($_.Exception.Message)" -ForegroundColor Yellow
+                        # Resume progress indicator
+                        Write-Host "`r  Scanning archived processes... Page $page ($totalProcessesChecked processes checked)" -NoNewline -ForegroundColor Gray
                     }
                 }
 
@@ -2466,10 +2477,13 @@ function Get-ArchivedProcessDependencies {
             }
         }
         catch {
+            Write-Host ""  # New line before error
             Write-Host "  Warning: Failed to fetch archived processes page $page : $($_.Exception.Message)" -ForegroundColor Yellow
             $hasMore = $false
         }
     }
+
+    Write-Host ""  # New line after progress indicator
 
     return $archivedDependencies
 }
@@ -2481,12 +2495,11 @@ function Get-ActiveProcessDependencies {
         [hashtable]$ProcessDeleteMap
     )
 
-    Write-Host "  Fetching list of active processes..." -ForegroundColor Gray
-
     $activeDependencies = @()
     $page = 1
     $pageSize = 20
     $hasMore = $true
+    $totalProcessesChecked = 0
 
     # Step 1: Fetch all active processes with pagination
     # ListType=0 is for all active processes (ListType=7 is archived)
@@ -2496,9 +2509,10 @@ function Get-ActiveProcessDependencies {
             $response = Invoke-ApiGet -Url $listUrl -Token $Token
 
             if ($response -and $response.items -and $response.items.Count -gt 0) {
-                Write-Host "  Page $page : Found $($response.items.Count) active processes" -ForegroundColor Gray
+                # Update progress indicator (single line)
+                Write-Host "`r  Scanning active processes... Page $page ($($response.items.Count) processes)" -NoNewline -ForegroundColor Gray
 
-                # Collect UniqueIds for batch fetching (excluding processes being deleted)
+                # Collect UniqueIds for fetching (excluding processes being deleted)
                 $uniqueIds = $response.items | ForEach-Object {
                     $procUniqueId = $_.processUniqueId
                     # Skip processes that are being deleted
@@ -2515,49 +2529,54 @@ function Get-ActiveProcessDependencies {
                 }
 
                 if ($uniqueIds -and $uniqueIds.Count -gt 0) {
-                    # Step 2: Batch fetch active process details (10-20 per batch for efficiency)
-                    $batchSize = 15
-                    for ($i = 0; $i -lt $uniqueIds.Count; $i += $batchSize) {
-                        $batch = $uniqueIds[$i..[Math]::Min($i + $batchSize - 1, $uniqueIds.Count - 1)]
-
-                        # Build URL with multiple processUniqueIds query parameters
-                        $queryParams = $batch | ForEach-Object { "processUniqueIds=$_" }
-                        $batchUrl = "$SiteURL/mobile/api/v1/processes?" + ($queryParams -join '&')
+                    # Step 2: Fetch active process details individually using the correct API
+                    # NOTE: For ACTIVE processes, use /Api/v1/Processes/{processUniqueId}
+                    #       The mobile API is only for ARCHIVED processes
+                    foreach ($uniqueId in $uniqueIds) {
+                        $totalProcessesChecked++
 
                         try {
-                            $batchResponse = Invoke-ApiGet -Url $batchUrl -Token $Token
+                            # Use the standard API for active processes (not mobile API)
+                            $processUrl = "$SiteURL/Api/v1/Processes/$uniqueId"
+                            $processResponse = Invoke-ApiGet -Url $processUrl -Token $Token
 
-                            if ($batchResponse -and $batchResponse.data -and $batchResponse.data.Count -gt 0) {
-                                # Step 3: Search each active process for links to processes being deleted
-                                foreach ($activeProcess in $batchResponse.data) {
-                                    $activeUniqueId = $activeProcess.ProcessModel.UniqueId
-                                    $activeName = $activeProcess.ProcessModel.Name
-                                    $activeProcessJson = $activeProcess.ProcessModel | ConvertTo-Json -Depth 20 -Compress
+                            if ($processResponse -and $processResponse.processJson) {
+                                $activeUniqueId = $processResponse.processJson.UniqueId
+                                $activeName = $processResponse.processJson.Name
+                                $activeProcessJson = $processResponse.processJson | ConvertTo-Json -Depth 20 -Compress
 
-                                    # Check if this active process has links to any process being deleted
-                                    foreach ($processKey in $ProcessDeleteMap.Keys) {
-                                        $processInfo = $ProcessDeleteMap[$processKey]
-                                        $targetUniqueId = $processInfo.UniqueId
+                                # Check if this active process has links to any process being deleted
+                                foreach ($processKey in $ProcessDeleteMap.Keys) {
+                                    $processInfo = $ProcessDeleteMap[$processKey]
+                                    $targetUniqueId = $processInfo.UniqueId
 
-                                        if (Find-ProcessLinksInJson -ProcessJson $activeProcessJson -TargetProcessUniqueId $targetUniqueId) {
-                                            Write-Host "    Found: $activeName has link to process $targetUniqueId" -ForegroundColor Yellow
+                                    if (Find-ProcessLinksInJson -ProcessJson $activeProcessJson -TargetProcessUniqueId $targetUniqueId) {
+                                        # Show on new line when dependency found
+                                        Write-Host ""
+                                        Write-Host "    Found: $activeName has link to process $targetUniqueId" -ForegroundColor Yellow
 
-                                            # Add to dependencies list
-                                            $activeDependencies += @{
-                                                Type = "Linked Process"
-                                                UniqueId = $activeUniqueId
-                                                Name = $activeName
-                                                ReferencedProcessKey = $processKey
-                                                IsArchived = $false
-                                            }
+                                        # Add to dependencies list
+                                        $activeDependencies += @{
+                                            Type = "Linked Process"
+                                            UniqueId = $activeUniqueId
+                                            Name = $activeName
+                                            ReferencedProcessKey = $processKey
+                                            IsArchived = $false
                                         }
+
+                                        # Resume progress indicator
+                                        Write-Host "`r  Scanning active processes... Page $page ($totalProcessesChecked processes checked)" -NoNewline -ForegroundColor Gray
                                     }
                                 }
                             }
                         }
                         catch {
-                            Write-Host "  Warning: Failed to fetch batch of active processes: $($_.Exception.Message)" -ForegroundColor Yellow
+                            # Silently continue on individual process errors to avoid cluttering output
+                            # Errors are typically due to permissions or deleted processes
                         }
+
+                        # Small delay to avoid rate limiting
+                        Start-Sleep -Milliseconds 100
                     }
                 }
 
@@ -2572,10 +2591,13 @@ function Get-ActiveProcessDependencies {
             }
         }
         catch {
+            Write-Host ""  # New line before error
             Write-Host "  Warning: Failed to fetch active processes page $page : $($_.Exception.Message)" -ForegroundColor Yellow
             $hasMore = $false
         }
     }
+
+    Write-Host ""  # New line after progress indicator
 
     return $activeDependencies
 }
@@ -2704,37 +2726,42 @@ function Remove-ProcessLinksFromJson {
         }
     }
 
-    # Clean Decision node links
+    # Orphan Decision node links (don't fully remove them)
+    # Decision links should be "orphaned" so users can see what was linked
+    # This is done by clearing the link reference but keeping the display name
     if ($processObj.ProcessProcedures.Decision) {
         foreach ($decision in $processObj.ProcessProcedures.Decision) {
             if ($decision.LinkedProcessUniqueId -eq $TargetProcessUniqueId) {
-                # Track ProcessId for LinkedStakeholders removal
+                # Track ProcessId (though we won't remove from LinkedStakeholders)
                 if ($decision.LinkedProcessId) {
                     $processIdsToRemove += $decision.LinkedProcessId
                 }
-                # Clear the linked process fields
+
+                # Orphan the decision link:
+                # - Clear the process references (ID, UniqueId, Name)
+                # - KEEP LinkedProcessDisplayName so users see what was linked
+                # - Change DecisionLinkType from 4 (linked) to 7 (orphaned)
                 $decision.LinkedProcessId = $null
                 $decision.LinkedProcessUniqueId = $null
                 $decision.LinkedProcessName = $null
-                $decision.LinkedProcessDisplayName = $null
+                # LinkedProcessDisplayName - KEEP AS IS (don't set to null)
                 $decision.LinkedProcessGroupId = $null
                 $decision.LinkedProcessGroupName = $null
                 $decision.LinkedProcessGroupUniqueId = $null
+
+                # Change DecisionLinkType from 4 (linked) to 7 (orphaned/broken link)
+                if ($decision.DecisionLinkType -eq 4) {
+                    $decision.DecisionLinkType = 7
+                }
+
                 $linksRemoved++
             }
         }
     }
 
-    # Remove from LinkedStakeholders using ALL the ProcessIds we collected
-    # This must happen AFTER we've processed all link types above
-    if ($processObj.LinkedStakeholders.LinkedStakeholder -and $processIdsToRemove.Count -gt 0) {
-        $originalCount = @($processObj.LinkedStakeholders.LinkedStakeholder).Count
-        $processObj.LinkedStakeholders.LinkedStakeholder = @($processObj.LinkedStakeholders.LinkedStakeholder | Where-Object {
-            $processIdsToRemove -notcontains $_.ProcessId
-        })
-        $newCount = @($processObj.LinkedStakeholders.LinkedStakeholder).Count
-        # Don't count these in linksRemoved as they're just stakeholder entries, not actual links
-    }
+    # NOTE: We do NOT remove from LinkedStakeholders
+    # LinkedStakeholders is a reference cache that helps Process Manager track related processes
+    # The UI uses this to show process relationships, and it should be preserved
 
     # Convert back to JSON string
     $cleanedJson = $processObj | ConvertTo-Json -Depth 20 -Compress
