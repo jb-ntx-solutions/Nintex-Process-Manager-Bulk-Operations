@@ -1,5 +1,5 @@
 # Nintex Process Manager Bulk Operations Script
-# Version 2.7 (Progress Counters)
+# Version 2.8 (Optimized Group Lookup)
 # Supports: Archive, Restore, Update Location, Update Ownership, and Delete operations
 
 #Requires -Version 5.1
@@ -643,6 +643,245 @@ function Get-ProcessGroups {
     }
 }
 
+function Get-ProcessGroupById {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$GroupId  # Can be numeric ID or GUID
+    )
+
+    try {
+        # Check if it's a GUID format
+        $guidRegex = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+        $isGuid = $GroupId -match $guidRegex
+
+        if ($isGuid) {
+            Write-Host "Looking up group by GUID: $GroupId" -ForegroundColor Gray
+
+            # Use breadcrumb API to verify the group exists and get its details
+            # This is much faster than fetching the entire tree
+            $url = "$SiteURL/bff/navigation/api/v1/breadcrumb/children?type=ProcessGroup&id=$GroupId"
+            $response = Invoke-ApiGet -Url $url -Token $Token
+
+            if ($response) {
+                # The breadcrumb API validates the group exists
+                # Now we need to get the group's name and numeric ID
+                # We can get the name from the breadcrumb itself
+                $breadcrumbUrl = "$SiteURL/bff/navigation/api/v1/breadcrumb?type=ProcessGroup&id=$GroupId"
+                $breadcrumbResponse = Invoke-ApiGet -Url $breadcrumbUrl -Token $Token
+
+                if ($breadcrumbResponse -and $breadcrumbResponse.breadcrumb) {
+                    # Find the target group in the breadcrumb trail (it's the last item)
+                    $targetGroup = $breadcrumbResponse.breadcrumb | Where-Object { $_.id -eq $GroupId } | Select-Object -Last 1
+
+                    if ($targetGroup) {
+                        # Get numeric ID from root groups (fast lookup)
+                        $numericId = Get-GroupNumericIdFromTree -SiteURL $SiteURL -Token $Token -TargetUniqueId $GroupId
+
+                        Write-Host "Found group: $($targetGroup.name)" -ForegroundColor Green
+
+                        return @{
+                            id = $numericId
+                            uniqueId = $GroupId
+                            name = $targetGroup.name
+                        }
+                    }
+                }
+            }
+
+            Write-Host "Could not find group with GUID: $GroupId" -ForegroundColor Red
+            return $null
+        }
+        else {
+            # Numeric ID - need to search the tree
+            Write-Host "Looking up group by numeric ID: $GroupId" -ForegroundColor Gray
+
+            # For numeric IDs, we still need to search the tree, but we can optimize
+            # by using a targeted search that stops once found
+            $numericId = [int]$GroupId
+            $group = Find-GroupInTreeByNumericId -SiteURL $SiteURL -Token $Token -TargetNumericId $numericId
+
+            if ($group) {
+                Write-Host "Found group: $($group.name)" -ForegroundColor Green
+                return $group
+            }
+
+            Write-Host "Could not find group with ID: $GroupId" -ForegroundColor Red
+            return $null
+        }
+    }
+    catch {
+        Write-Host "Error looking up group: $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
+}
+
+function Get-GroupNumericIdFromTree {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$TargetUniqueId
+    )
+
+    # This is an optimized search that checks root groups first, then searches deeper
+    try {
+        # First check root groups (fast)
+        $url = "$SiteURL/Process/View/GetChildProcessGroupTreeItems"
+        $response = Invoke-ApiGet -Url $url -Token $Token
+
+        if ($response -and $response.treeItems) {
+            $matchedGroup = $response.treeItems | Where-Object { $_.uniqueId -eq $TargetUniqueId }
+            if ($matchedGroup) {
+                return $matchedGroup.id
+            }
+
+            # Not in root groups, need to search children recursively
+            foreach ($rootGroup in $response.treeItems) {
+                if ($rootGroup.hasChild -and $rootGroup.totalSubgroups -gt 0) {
+                    $found = Search-GroupTreeForUniqueId -SiteURL $SiteURL -Token $Token `
+                        -ParentUniqueId $rootGroup.uniqueId -TargetUniqueId $TargetUniqueId
+
+                    if ($found -ne -1) {
+                        return $found
+                    }
+                }
+            }
+        }
+
+        return -1
+    }
+    catch {
+        Write-Host "Error searching for group numeric ID: $($_.Exception.Message)" -ForegroundColor Yellow
+        return -1
+    }
+}
+
+function Search-GroupTreeForUniqueId {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$ParentUniqueId,
+        [string]$TargetUniqueId
+    )
+
+    try {
+        $url = "$SiteURL/Process/View/GetChildProcessGroupTreeItems?uniqueId=$ParentUniqueId"
+        $response = Invoke-ApiGet -Url $url -Token $Token
+
+        if ($response -and $response.treeItems) {
+            # Check if target is in this level
+            $matchedGroup = $response.treeItems | Where-Object { $_.uniqueId -eq $TargetUniqueId }
+            if ($matchedGroup) {
+                return $matchedGroup.id
+            }
+
+            # Search children recursively
+            foreach ($group in $response.treeItems) {
+                if ($group.hasChild -and $group.totalSubgroups -gt 0) {
+                    $found = Search-GroupTreeForUniqueId -SiteURL $SiteURL -Token $Token `
+                        -ParentUniqueId $group.uniqueId -TargetUniqueId $TargetUniqueId
+
+                    if ($found -ne -1) {
+                        return $found
+                    }
+                }
+            }
+        }
+
+        return -1
+    }
+    catch {
+        return -1
+    }
+}
+
+function Find-GroupInTreeByNumericId {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [int]$TargetNumericId
+    )
+
+    try {
+        # Get root groups
+        $url = "$SiteURL/Process/View/GetChildProcessGroupTreeItems"
+        $response = Invoke-ApiGet -Url $url -Token $Token
+
+        if ($response -and $response.treeItems) {
+            # Check root level first
+            $matchedGroup = $response.treeItems | Where-Object { $_.id -eq $TargetNumericId }
+            if ($matchedGroup) {
+                return @{
+                    id = $matchedGroup.id
+                    uniqueId = $matchedGroup.uniqueId
+                    name = $matchedGroup.title
+                }
+            }
+
+            # Search children recursively
+            foreach ($rootGroup in $response.treeItems) {
+                if ($rootGroup.hasChild -and $rootGroup.totalSubgroups -gt 0) {
+                    $found = Search-GroupTreeForNumericId -SiteURL $SiteURL -Token $Token `
+                        -ParentUniqueId $rootGroup.uniqueId -TargetNumericId $TargetNumericId
+
+                    if ($found) {
+                        return $found
+                    }
+                }
+            }
+        }
+
+        return $null
+    }
+    catch {
+        Write-Host "Error searching for group by numeric ID: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $null
+    }
+}
+
+function Search-GroupTreeForNumericId {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$ParentUniqueId,
+        [int]$TargetNumericId
+    )
+
+    try {
+        $url = "$SiteURL/Process/View/GetChildProcessGroupTreeItems?uniqueId=$ParentUniqueId"
+        $response = Invoke-ApiGet -Url $url -Token $Token
+
+        if ($response -and $response.treeItems) {
+            # Check if target is in this level
+            $matchedGroup = $response.treeItems | Where-Object { $_.id -eq $TargetNumericId }
+            if ($matchedGroup) {
+                return @{
+                    id = $matchedGroup.id
+                    uniqueId = $matchedGroup.uniqueId
+                    name = $matchedGroup.title
+                }
+            }
+
+            # Search children recursively
+            foreach ($group in $response.treeItems) {
+                if ($group.hasChild -and $group.totalSubgroups -gt 0) {
+                    $found = Search-GroupTreeForNumericId -SiteURL $SiteURL -Token $Token `
+                        -ParentUniqueId $group.uniqueId -TargetNumericId $TargetNumericId
+
+                    if ($found) {
+                        return $found
+                    }
+                }
+            }
+        }
+
+        return $null
+    }
+    catch {
+        return $null
+    }
+}
+
 function Get-GroupNumericIdByUniqueId {
     param(
         [string]$SiteURL,
@@ -845,7 +1084,7 @@ function Select-ProcessGroup {
     }
 
     if ($choice -eq "2") {
-        # Manual entry
+        # Manual entry - OPTIMIZED: Use direct lookup instead of fetching entire tree
         Write-Host "`nEnter Process Group ID" -ForegroundColor Cyan
         Write-Host "You can find the Group ID in the URL when viewing a group in Process Manager" -ForegroundColor Gray
         Write-Host "Examples:" -ForegroundColor Gray
@@ -854,33 +1093,21 @@ function Select-ProcessGroup {
 
         $groupId = Read-Host "`nGroup ID"
 
-        $groups = Get-ProcessGroups -SiteURL $SiteURL -Token $Token
+        # Validate format first
+        $isNumeric = $groupId -match '^\d+$'
+        $isGuid = $groupId -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 
-        # Check if it's a numeric ID
-        if ($groupId -match '^\d+$') {
-            $matchedGroup = $groups | Where-Object { $_.id -eq [int]$groupId }
-            if ($matchedGroup) {
-                Write-Host "Found group: $($matchedGroup.name)" -ForegroundColor Green
-                return $matchedGroup
-            } else {
-                Write-Host "Could not find group with ID: $groupId" -ForegroundColor Red
-                return $null
-            }
-        }
-        # Check if it's a GUID
-        elseif ($groupId -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
-            $matchedGroup = $groups | Where-Object { $_.uniqueId -eq $groupId }
-
-            if ($matchedGroup) {
-                Write-Host "Found group: $($matchedGroup.name)" -ForegroundColor Green
-                return $matchedGroup
-            } else {
-                Write-Host "Could not find group with GUID: $groupId" -ForegroundColor Red
-                return $null
-            }
-        }
-        else {
+        if (-not ($isNumeric -or $isGuid)) {
             Write-Host "Invalid Group ID format. Must be a number or a GUID." -ForegroundColor Red
+            return $null
+        }
+
+        # Use optimized lookup function that doesn't fetch entire tree
+        $matchedGroup = Get-ProcessGroupById -SiteURL $SiteURL -Token $Token -GroupId $groupId
+
+        if ($matchedGroup) {
+            return $matchedGroup
+        } else {
             return $null
         }
     }
