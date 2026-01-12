@@ -2324,6 +2324,16 @@ function Find-ProcessLinksInJson {
         }
     }
 
+    # Check ProcessProcedures.Decision
+    if ($processObj.ProcessProcedures.Decision) {
+        $found = @($processObj.ProcessProcedures.Decision | Where-Object {
+            $_.LinkedProcessUniqueId -eq $TargetProcessUniqueId
+        })
+        if ($found.Count -gt 0) {
+            return $true
+        }
+    }
+
     return $false
 }
 
@@ -2475,6 +2485,23 @@ function Remove-ProcessLinksFromJson {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    # Clean Decision node links
+    if ($processObj.ProcessProcedures.Decision) {
+        foreach ($decision in $processObj.ProcessProcedures.Decision) {
+            if ($decision.LinkedProcessUniqueId -eq $TargetProcessUniqueId) {
+                # Clear the linked process fields
+                $decision.LinkedProcessId = $null
+                $decision.LinkedProcessUniqueId = $null
+                $decision.LinkedProcessName = $null
+                $decision.LinkedProcessDisplayName = $null
+                $decision.LinkedProcessGroupId = $null
+                $decision.LinkedProcessGroupName = $null
+                $decision.LinkedProcessGroupUniqueId = $null
+                $linksRemoved++
             }
         }
     }
