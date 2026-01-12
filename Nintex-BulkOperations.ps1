@@ -1022,28 +1022,36 @@ function Get-GroupsInTree {
         [string]$Token,
         [string]$RootGroupUniqueId,
         [int]$RootGroupId = -1,
-        [switch]$IncludeRoot = $true
+        [array]$AllGroups = @(),
+        [bool]$IncludeRoot = $true
     )
 
-    # Get all groups in the site
-    $allGroups = Get-ProcessGroups -SiteURL $SiteURL -Token $Token
-    if (-not $allGroups) {
-        Write-Host "Warning: Could not retrieve process groups" -ForegroundColor Yellow
-        return @()
+    # Get all groups in the site (or use provided array)
+    if ($AllGroups.Count -eq 0) {
+        $AllGroups = Get-ProcessGroups -SiteURL $SiteURL -Token $Token
+        if (-not $AllGroups) {
+            Write-Host "Warning: Could not retrieve process groups" -ForegroundColor Yellow
+            return @()
+        }
     }
+
+    Write-Host "  Searching for group with UniqueId: $RootGroupUniqueId" -ForegroundColor Gray
 
     # Find the root group
     $rootGroup = $null
     if ($RootGroupUniqueId) {
-        $rootGroup = $allGroups | Where-Object { $_.uniqueId -eq $RootGroupUniqueId } | Select-Object -First 1
+        $rootGroup = $AllGroups | Where-Object { $_.uniqueId -eq $RootGroupUniqueId } | Select-Object -First 1
     } elseif ($RootGroupId -gt 0) {
-        $rootGroup = $allGroups | Where-Object { $_.id -eq $RootGroupId } | Select-Object -First 1
+        $rootGroup = $AllGroups | Where-Object { $_.id -eq $RootGroupId } | Select-Object -First 1
     }
 
     if (-not $rootGroup) {
-        Write-Host "Warning: Could not find root group" -ForegroundColor Yellow
+        Write-Host "  Warning: Could not find root group with UniqueId '$RootGroupUniqueId'" -ForegroundColor Yellow
+        Write-Host "  Total groups available: $($AllGroups.Count)" -ForegroundColor Yellow
         return @()
     }
+
+    Write-Host "  Found root group: '$($rootGroup.name)' (ID: $($rootGroup.id))" -ForegroundColor Gray
 
     # Recursive function to get all descendant groups with their depth
     function Get-DescendantGroups {
@@ -1077,7 +1085,9 @@ function Get-GroupsInTree {
     }
 
     # Get all descendants
-    $groupsInTree = Get-DescendantGroups -ParentGroup $rootGroup -AllGroups $allGroups -Depth 1
+    $groupsInTree = Get-DescendantGroups -ParentGroup $rootGroup -AllGroups $AllGroups -Depth 1
+
+    Write-Host "  Found $($groupsInTree.Count) descendant group(s)" -ForegroundColor Gray
 
     # Include root group if requested
     if ($IncludeRoot) {
@@ -1090,6 +1100,8 @@ function Get-GroupsInTree {
         }
         $groupsInTree = @($rootGroupInfo) + $groupsInTree
     }
+
+    Write-Host "  Total groups to delete (including root): $($groupsInTree.Count)" -ForegroundColor Gray
 
     # Sort by depth descending (deepest first) so we delete children before parents
     $groupsInTree = $groupsInTree | Sort-Object -Property Depth -Descending
@@ -3035,7 +3047,7 @@ function Invoke-BulkDeleteProcesses {
             Write-Host "=== OPTIONAL GROUP DELETION ===" -ForegroundColor Yellow
             Write-Host "If you choose to delete group folders after process/document deletion:" -ForegroundColor Cyan
 
-            $groupsToDelete = Get-GroupsInTree -SiteURL $SiteURL -Token $Token -RootGroupUniqueId $GroupUniqueId -IncludeRoot
+            $groupsToDelete = Get-GroupsInTree -SiteURL $SiteURL -Token $Token -RootGroupUniqueId $GroupUniqueId -IncludeRoot $true
 
             if ($groupsToDelete.Count -gt 0) {
                 Write-Host "The following $($groupsToDelete.Count) group(s) would be deleted (bottom to top):" -ForegroundColor Cyan
@@ -3729,9 +3741,10 @@ function Invoke-BulkDeleteProcesses {
 
         if ($deleteGroups -eq 'Y' -or $deleteGroups -eq 'y') {
             Write-Host "`nRetrieving group hierarchy..." -ForegroundColor Cyan
+            Write-Host "  Source GroupUniqueId parameter: $GroupUniqueId" -ForegroundColor Gray
 
             # Get all groups in the tree (sorted by depth, deepest first)
-            $groupsToDelete = Get-GroupsInTree -SiteURL $SiteURL -Token $Token -RootGroupUniqueId $GroupUniqueId -IncludeRoot
+            $groupsToDelete = Get-GroupsInTree -SiteURL $SiteURL -Token $Token -RootGroupUniqueId $GroupUniqueId -IncludeRoot $true
 
             if ($groupsToDelete.Count -gt 0) {
                 Write-Host "Found $($groupsToDelete.Count) group(s) to delete:" -ForegroundColor Yellow
