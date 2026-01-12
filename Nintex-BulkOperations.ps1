@@ -3062,7 +3062,7 @@ function Invoke-BulkDeleteProcesses {
     if ($processesToDelete.Count -gt 0) {
         Write-Host "`n=== Getting Process Details ===" -ForegroundColor Cyan
 
-    $processDeleteMap = @{}  # Maps any ID to object with {NumericId, UniqueId, GroupUniqueId}
+    $processDeleteMap = @{}  # Maps any ID to object with {NumericId, UniqueId, GroupUniqueId, Name}
 
     # Special handling for archived processes - use mobile API endpoint
     if ($SourceType -eq "Archived") {
@@ -3092,6 +3092,7 @@ function Invoke-BulkDeleteProcesses {
                             NumericId = $model.Id
                             UniqueId = $model.UniqueId
                             GroupUniqueId = $model.GroupUniqueId
+                            Name = $model.Name
                         }
                     }
                 }
@@ -3125,6 +3126,7 @@ function Invoke-BulkDeleteProcesses {
                         NumericId = $numericId
                         UniqueId = $processId
                         GroupUniqueId = $groupUniqueId
+                        Name = $processStatus.Name
                     }
                 } else {
                     Write-Host "`n  Warning: Could not retrieve process details for UniqueId $processId" -ForegroundColor Yellow
@@ -3145,6 +3147,7 @@ function Invoke-BulkDeleteProcesses {
                         NumericId = $processId
                         UniqueId = $process.uniqueId
                         GroupUniqueId = $groupUniqueId
+                        Name = if ($processStatus) { $processStatus.Name } else { $null }
                     }
                     Write-Host "  Process ID $processId -> UniqueId: $($process.uniqueId), GroupUniqueId: $groupUniqueId" -ForegroundColor Gray
                 } else {
