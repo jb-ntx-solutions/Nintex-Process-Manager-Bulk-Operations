@@ -2991,49 +2991,39 @@ function Update-ProcessAndPublish {
         $wasPreviouslyPublished = $majorVersion -gt 0
         $isInProgress = $minorVersion -gt 0
 
-        # Step 2: Remove links/references from object based on dependency type
+        # Step 2: Remove ALL types of references from the process object
+        # The CheckProcessDependencies API may not accurately report the type (e.g., may report "Linked Process"
+        # when the actual reference is in Outputs), so we check ALL locations regardless of reported type
         Write-Host "  DEBUG: Processing process '$($processObj.Name)' (Version: $($processObj.Version), WasPreviouslyPublished: $wasPreviouslyPublished, IsInProgress: $isInProgress)" -ForegroundColor Magenta
-        Write-Host "  DEBUG: DependencyType = $DependencyType, TargetProcessUniqueId = $TargetProcessUniqueId" -ForegroundColor Magenta
+        Write-Host "  DEBUG: DependencyType reported = $DependencyType, TargetProcessUniqueId = $TargetProcessUniqueId" -ForegroundColor Magenta
+        Write-Host "  DEBUG: Checking ALL reference locations (ProcessLinks, Decisions, Inputs, Outputs)..." -ForegroundColor Magenta
 
-        $linksOrReferencesRemoved = 0
+        $totalReferencesRemoved = 0
         $needsPublishOnly = $false
 
-        if ($DependencyType -eq "Process Input" -or $DependencyType -eq "Process Output") {
-            $result = Remove-InputOutputReferencesFromObject -ProcessObj $processObj -TargetProcessUniqueId $TargetProcessUniqueId
-            $linksOrReferencesRemoved = $result.ReferencesRemoved
-            $cleanedProcessObj = $result.CleanedObject
+        # Remove from ProcessLinks and Decisions
+        $linkResult = Remove-ProcessLinksFromObject -ProcessObj $processObj -TargetProcessUniqueId $TargetProcessUniqueId
+        $totalReferencesRemoved += $linkResult.LinksRemoved
+        $cleanedProcessObj = $linkResult.CleanedObject
 
-            if ($linksOrReferencesRemoved -eq 0) {
-                if ($isInProgress -and $wasPreviouslyPublished) {
-                    # No references found but process is in-progress - still need to publish to finalize removal
-                    Write-Host "  DEBUG: No references found to remove, but process is in-progress (v$($processObj.Version)) - will publish to finalize dependency removal" -ForegroundColor Yellow
-                    $needsPublishOnly = $true
-                } else {
-                    Write-Host "  DEBUG: No references found to remove - returning early" -ForegroundColor Gray
-                    return $true
-                }
-            } else {
-                Write-Host "  DEBUG: Removed $linksOrReferencesRemoved references - proceeding to update" -ForegroundColor Yellow
-            }
-        }
-        else {
-            # Default: Linked Process removal
-            $result = Remove-ProcessLinksFromObject -ProcessObj $processObj -TargetProcessUniqueId $TargetProcessUniqueId
-            $linksOrReferencesRemoved = $result.LinksRemoved
-            $cleanedProcessObj = $result.CleanedObject
+        # Also remove from Inputs and Outputs
+        $ioResult = Remove-InputOutputReferencesFromObject -ProcessObj $cleanedProcessObj -TargetProcessUniqueId $TargetProcessUniqueId
+        $totalReferencesRemoved += $ioResult.ReferencesRemoved
+        $cleanedProcessObj = $ioResult.CleanedObject
 
-            if ($linksOrReferencesRemoved -eq 0) {
-                if ($isInProgress -and $wasPreviouslyPublished) {
-                    # No links found but process is in-progress - still need to publish to finalize removal
-                    Write-Host "  DEBUG: No links found to remove, but process is in-progress (v$($processObj.Version)) - will publish to finalize dependency removal" -ForegroundColor Yellow
-                    $needsPublishOnly = $true
-                } else {
-                    Write-Host "  DEBUG: No links found to remove - returning early" -ForegroundColor Gray
-                    return $true
-                }
+        Write-Host "  DEBUG: Total references removed: $totalReferencesRemoved (Links: $($linkResult.LinksRemoved), I/O: $($ioResult.ReferencesRemoved))" -ForegroundColor Magenta
+
+        if ($totalReferencesRemoved -eq 0) {
+            if ($isInProgress -and $wasPreviouslyPublished) {
+                # No references found but process is in-progress - still need to publish to finalize removal
+                Write-Host "  DEBUG: No references found to remove, but process is in-progress (v$($processObj.Version)) - will publish to finalize dependency removal" -ForegroundColor Yellow
+                $needsPublishOnly = $true
             } else {
-                Write-Host "  DEBUG: Removed $linksOrReferencesRemoved links - proceeding to update" -ForegroundColor Yellow
+                Write-Host "  DEBUG: No references found to remove - returning early" -ForegroundColor Gray
+                return $true
             }
+        } else {
+            Write-Host "  DEBUG: Removed $totalReferencesRemoved total references - proceeding to update" -ForegroundColor Yellow
         }
 
         # Step 3: Update process with cleaned JSON (skip if only publishing)
@@ -4079,6 +4069,91 @@ function Invoke-BulkDeleteProcesses {
         }
 
         Write-Host "`n=== All Dependencies Processed ===" -ForegroundColor Green
+    }
+
+    # Step 5.5: Pre-archive verification - recheck dependency API to ensure all dependencies were removed
+    Write-Host "`n=== PHASE 5.5: Verifying Dependency Removal ===" -ForegroundColor Cyan
+    Write-Host "Re-checking dependency API to verify all references have been removed..." -ForegroundColor Gray
+
+    $verificationFailed = $false
+    $remainingDependencies = @()
+    $totalChecked = 0
+    $totalTargets = $processDeleteMap.Keys.Count
+
+    foreach ($processKey in $processDeleteMap.Keys) {
+        $totalChecked++
+        $processInfo = $processDeleteMap[$processKey]
+        $targetUniqueId = $processInfo.UniqueId
+        $targetName = $processInfo.Name
+
+        Write-Host "`r  Verifying process $totalChecked of $totalTargets..." -NoNewline -ForegroundColor Gray
+
+        try {
+            $url = "$SiteURL/Api/v1/Processes/$targetUniqueId/CheckProcessDependencies?searchBehavior=15"
+            $dependencies = Invoke-ApiGet -Url $url -Token $Token
+
+            if ($dependencies) {
+                $depArray = @()
+                if ($dependencies -is [Array]) {
+                    $depArray = $dependencies
+                } else {
+                    $depArray = @($dependencies)
+                }
+
+                foreach ($depType in $depArray) {
+                    $typeName = $depType.Type
+                    # Check for any automatic dependency types that should have been removed
+                    if (($typeName -eq "Linked Process" -or $typeName -eq "Process Input" -or $typeName -eq "Process Output") -and $depType.Dependencies -and $depType.Dependencies.Count -gt 0) {
+                        $verificationFailed = $true
+                        Write-Host ""
+                        Write-Host "    WARNING: Process '$targetName' still has $($depType.Dependencies.Count) '$typeName' dependencies:" -ForegroundColor Red
+                        foreach ($dep in $depType.Dependencies) {
+                            Write-Host "      - $($dep.Name) ($($dep.UniqueId))" -ForegroundColor Red
+                            $remainingDependencies += @{
+                                TargetProcess = $targetName
+                                TargetUniqueId = $targetUniqueId
+                                DependencyType = $typeName
+                                DependencyName = $dep.Name
+                                DependencyUniqueId = $dep.UniqueId
+                            }
+                        }
+                        Write-Host "`r  Verifying process $totalChecked of $totalTargets..." -NoNewline -ForegroundColor Gray
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Host ""
+            Write-Host "    Warning: Failed to verify dependencies for process $targetUniqueId : $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "`r  Verifying process $totalChecked of $totalTargets..." -NoNewline -ForegroundColor Gray
+        }
+    }
+    Write-Host ""  # New line after progress indicator
+
+    if ($verificationFailed) {
+        Write-Host "`n=== VERIFICATION FAILED ===" -ForegroundColor Red
+        Write-Host "The following dependencies were NOT successfully removed:" -ForegroundColor Red
+        Write-Host ""
+
+        # Group by target process
+        $groupedDeps = $remainingDependencies | Group-Object -Property TargetProcess
+        foreach ($group in $groupedDeps) {
+            Write-Host "  Target: $($group.Name)" -ForegroundColor Yellow
+            foreach ($dep in $group.Group) {
+                Write-Host "    - [$($dep.DependencyType)] $($dep.DependencyName) ($($dep.DependencyUniqueId))" -ForegroundColor Red
+            }
+        }
+
+        Write-Host ""
+        Write-Host "These dependencies must be removed before archiving/deleting." -ForegroundColor Yellow
+        $continueAnyway = Read-Host "Do you want to continue anyway? (Y/N)"
+        if ($continueAnyway -ne 'Y') {
+            Write-Host "Operation cancelled. Please manually remove the remaining dependencies and try again." -ForegroundColor Yellow
+            return
+        }
+        Write-Host "Continuing despite remaining dependencies..." -ForegroundColor Yellow
+    } else {
+        Write-Host "Verification successful: All automatic dependencies have been removed!" -ForegroundColor Green
     }
 
     # Step 6: Archive processes (skipping ownership update as it's not needed with bypass approvals)
