@@ -2985,65 +2985,91 @@ function Update-ProcessAndPublish {
         # Keep as object for manipulation, convert to JSON string only at the end
         $processObj = $processData.processJson
         $processRevisionEditId = $processObj.ProcessRevisionEditId
-        $majorVersion = [int]($processObj.Version.Split('.')[0])
+        $versionParts = $processObj.Version.Split('.')
+        $majorVersion = [int]$versionParts[0]
+        $minorVersion = if ($versionParts.Count -gt 1) { [int]$versionParts[1] } else { 0 }
         $wasPreviouslyPublished = $majorVersion -gt 0
+        $isInProgress = $minorVersion -gt 0
 
         # Step 2: Remove links/references from object based on dependency type
-        Write-Host "  DEBUG: Processing process '$($processObj.Name)' (Version: $($processObj.Version), WasPreviouslyPublished: $wasPreviouslyPublished)" -ForegroundColor Magenta
+        Write-Host "  DEBUG: Processing process '$($processObj.Name)' (Version: $($processObj.Version), WasPreviouslyPublished: $wasPreviouslyPublished, IsInProgress: $isInProgress)" -ForegroundColor Magenta
         Write-Host "  DEBUG: DependencyType = $DependencyType, TargetProcessUniqueId = $TargetProcessUniqueId" -ForegroundColor Magenta
+
+        $linksOrReferencesRemoved = 0
+        $needsPublishOnly = $false
 
         if ($DependencyType -eq "Process Input" -or $DependencyType -eq "Process Output") {
             $result = Remove-InputOutputReferencesFromObject -ProcessObj $processObj -TargetProcessUniqueId $TargetProcessUniqueId
-
-            if ($result.ReferencesRemoved -eq 0) {
-                Write-Host "  DEBUG: No references found to remove - returning early" -ForegroundColor Gray
-                return $true
-            }
-            Write-Host "  DEBUG: Removed $($result.ReferencesRemoved) references - proceeding to update" -ForegroundColor Yellow
+            $linksOrReferencesRemoved = $result.ReferencesRemoved
             $cleanedProcessObj = $result.CleanedObject
+
+            if ($linksOrReferencesRemoved -eq 0) {
+                if ($isInProgress -and $wasPreviouslyPublished) {
+                    # No references found but process is in-progress - still need to publish to finalize removal
+                    Write-Host "  DEBUG: No references found to remove, but process is in-progress (v$($processObj.Version)) - will publish to finalize dependency removal" -ForegroundColor Yellow
+                    $needsPublishOnly = $true
+                } else {
+                    Write-Host "  DEBUG: No references found to remove - returning early" -ForegroundColor Gray
+                    return $true
+                }
+            } else {
+                Write-Host "  DEBUG: Removed $linksOrReferencesRemoved references - proceeding to update" -ForegroundColor Yellow
+            }
         }
         else {
             # Default: Linked Process removal
             $result = Remove-ProcessLinksFromObject -ProcessObj $processObj -TargetProcessUniqueId $TargetProcessUniqueId
-
-            if ($result.LinksRemoved -eq 0) {
-                Write-Host "  DEBUG: No links found to remove - returning early" -ForegroundColor Gray
-                return $true
-            }
-            Write-Host "  DEBUG: Removed $($result.LinksRemoved) links - proceeding to update" -ForegroundColor Yellow
+            $linksOrReferencesRemoved = $result.LinksRemoved
             $cleanedProcessObj = $result.CleanedObject
-        }
 
-        # Step 3: Update process with cleaned JSON
-        # ProcessJson must be a JSON string (the API expects a string value, not an object)
-        # The string will be properly escaped when the outer body is serialized
-        $cleanedJsonString = $cleanedProcessObj | ConvertTo-Json -Depth 20 -Compress
-
-        $updateBody = @{
-            ProcessJson = $cleanedJsonString
-            ChangeDescription = ""
-            DoSubmitForApproval = $false
-            DoPublish = $false
-            SuppressChangeNotification = $false
-            SharedActivityCollectionEditModel = @{
-                ActivitiesToDelete = @()
-                ActivitiesToShare = @()
-                ActivitiesToUnlink = @()
+            if ($linksOrReferencesRemoved -eq 0) {
+                if ($isInProgress -and $wasPreviouslyPublished) {
+                    # No links found but process is in-progress - still need to publish to finalize removal
+                    Write-Host "  DEBUG: No links found to remove, but process is in-progress (v$($processObj.Version)) - will publish to finalize dependency removal" -ForegroundColor Yellow
+                    $needsPublishOnly = $true
+                } else {
+                    Write-Host "  DEBUG: No links found to remove - returning early" -ForegroundColor Gray
+                    return $true
+                }
+            } else {
+                Write-Host "  DEBUG: Removed $linksOrReferencesRemoved links - proceeding to update" -ForegroundColor Yellow
             }
-            VariantConnectionChangeStates = @()
         }
 
-        $updateUrl = "$SiteURL/Api/v1/Processes/$ProcessUniqueId"
-        $updateResult = Invoke-ApiPut -Url $updateUrl -Token $Token -Body $updateBody
+        # Step 3: Update process with cleaned JSON (skip if only publishing)
+        if (-not $needsPublishOnly) {
+            # ProcessJson must be a JSON string (the API expects a string value, not an object)
+            # The string will be properly escaped when the outer body is serialized
+            $cleanedJsonString = $cleanedProcessObj | ConvertTo-Json -Depth 20 -Compress
 
-        if (-not $updateResult -or -not $updateResult.Success) {
-            return $false
+            $updateBody = @{
+                ProcessJson = $cleanedJsonString
+                ChangeDescription = ""
+                DoSubmitForApproval = $false
+                DoPublish = $false
+                SuppressChangeNotification = $false
+                SharedActivityCollectionEditModel = @{
+                    ActivitiesToDelete = @()
+                    ActivitiesToShare = @()
+                    ActivitiesToUnlink = @()
+                }
+                VariantConnectionChangeStates = @()
+            }
+
+            $updateUrl = "$SiteURL/Api/v1/Processes/$ProcessUniqueId"
+            $updateResult = Invoke-ApiPut -Url $updateUrl -Token $Token -Body $updateBody
+
+            if (-not $updateResult -or -not $updateResult.Success) {
+                return $false
+            }
+        } else {
+            Write-Host "  DEBUG: Skipping update step - proceeding directly to publish" -ForegroundColor Yellow
         }
 
-        # Step 4: Publish if needed
+        # Step 4: Publish if needed (or if needsPublishOnly is true)
         if ($wasPreviouslyPublished) {
 
-            # Get updated process data to get new ProcessRevisionEditId
+            # Get current process data to get ProcessRevisionEditId
             Start-Sleep -Seconds 1
             $updatedProcessData = Invoke-ApiGet -Url $getUrl -Token $Token
             $newProcessRevisionEditId = $updatedProcessData.processJson.ProcessRevisionEditId
@@ -3649,9 +3675,8 @@ function Invoke-BulkDeleteProcesses {
     $activeDependencies = Get-ActiveProcessDependencies -SiteURL $SiteURL -Token $Token -ProcessDeleteMap $processDeleteMap
 
     if ($activeDependencies.Count -gt 0) {
-        Write-Host "  Found $($activeDependencies.Count) active process(es) with dependencies" -ForegroundColor Yellow
-
-        # Add active dependencies to the dependencyMap
+        # Add active dependencies to the dependencyMap (deduplicates by Type|UniqueId)
+        $addedCount = 0
         foreach ($activeDep in $activeDependencies) {
             $depKey = "$($activeDep.Type)|$($activeDep.UniqueId)"
 
@@ -3663,14 +3688,23 @@ function Invoke-BulkDeleteProcesses {
                     ReferencedByProcesses = @()
                     IsArchived = $false
                 }
+                $addedCount++
             }
 
             # Add the process key that this active process references
             if ($dependencyMap[$depKey].ReferencedByProcesses -notcontains $activeDep.ReferencedProcessKey) {
                 $dependencyMap[$depKey].ReferencedByProcesses += $activeDep.ReferencedProcessKey
             }
+        }
 
-            Write-Host "    - [Active] $($activeDep.Name) ($($activeDep.UniqueId))" -ForegroundColor Gray
+        # Get unique processes from the active dependencies
+        $uniqueProcesses = $activeDependencies | Select-Object -Property UniqueId, Name -Unique
+
+        Write-Host "  Found $($uniqueProcesses.Count) active process(es) with $addedCount unique dependency type(s)" -ForegroundColor Yellow
+        foreach ($proc in $uniqueProcesses) {
+            # Count how many dependency types this process has
+            $procDepTypes = $activeDependencies | Where-Object { $_.UniqueId -eq $proc.UniqueId } | Select-Object -Property Type -Unique
+            Write-Host "    - [Active] $($proc.Name) ($($proc.UniqueId)) - $($procDepTypes.Count) dependency type(s)" -ForegroundColor Gray
         }
     } else {
         Write-Host "  No active process dependencies found" -ForegroundColor Green
@@ -3683,9 +3717,8 @@ function Invoke-BulkDeleteProcesses {
     $archivedDependencies = Get-ArchivedProcessDependencies -SiteURL $SiteURL -Token $Token -ProcessDeleteMap $processDeleteMap
 
     if ($archivedDependencies.Count -gt 0) {
-        Write-Host "  Found $($archivedDependencies.Count) archived process(es) with dependencies" -ForegroundColor Yellow
-
-        # Add archived dependencies to the dependencyMap
+        # Add archived dependencies to the dependencyMap (deduplicates by Type|UniqueId)
+        $addedCount = 0
         foreach ($archivedDep in $archivedDependencies) {
             $depKey = "$($archivedDep.Type)|$($archivedDep.UniqueId)"
 
@@ -3697,14 +3730,23 @@ function Invoke-BulkDeleteProcesses {
                     ReferencedByProcesses = @()
                     IsArchived = $true
                 }
+                $addedCount++
             }
 
             # Add the process key that this archived process references
             if ($dependencyMap[$depKey].ReferencedByProcesses -notcontains $archivedDep.ReferencedProcessKey) {
                 $dependencyMap[$depKey].ReferencedByProcesses += $archivedDep.ReferencedProcessKey
             }
+        }
 
-            Write-Host "    - [Archived] $($archivedDep.Name) ($($archivedDep.UniqueId))" -ForegroundColor Gray
+        # Get unique processes from the archived dependencies
+        $uniqueProcesses = $archivedDependencies | Select-Object -Property UniqueId, Name -Unique
+
+        Write-Host "  Found $($uniqueProcesses.Count) archived process(es) with $addedCount unique dependency type(s)" -ForegroundColor Yellow
+        foreach ($proc in $uniqueProcesses) {
+            # Count how many dependency types this process has
+            $procDepTypes = $archivedDependencies | Where-Object { $_.UniqueId -eq $proc.UniqueId } | Select-Object -Property Type -Unique
+            Write-Host "    - [Archived] $($proc.Name) ($($proc.UniqueId)) - $($procDepTypes.Count) dependency type(s)" -ForegroundColor Gray
         }
     } else {
         Write-Host "  No archived process dependencies found" -ForegroundColor Green
