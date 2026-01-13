@@ -165,7 +165,7 @@ function Invoke-ApiPut {
             "X-Requested-With" = "XMLHttpRequest"
         }
 
-        $jsonBody = $Body | ConvertTo-Json -Depth 10
+        $jsonBody = $Body | ConvertTo-Json -Depth 20
 
         # DEBUG: Log the request details
         Write-Host "`n=== DEBUG: PUT Request Details ===" -ForegroundColor Magenta
@@ -2332,11 +2332,14 @@ function Delete-Process {
     }
 }
 
-function Find-ProcessLinksInJson {
+# Returns an array of dependency types found (e.g., @("Linked Process", "Process Input", "Process Output"))
+function Find-ProcessDependenciesInJson {
     param(
         [string]$ProcessJson,
         [string]$TargetProcessUniqueId
     )
+
+    $foundTypes = @()
 
     # Convert JSON string to object
     $processObj = $ProcessJson | ConvertFrom-Json
@@ -2347,7 +2350,7 @@ function Find-ProcessLinksInJson {
             $_.LinkedProcessUniqueId -eq $TargetProcessUniqueId
         })
         if ($found.Count -gt 0) {
-            return $true
+            $foundTypes += "Linked Process"
         }
     }
 
@@ -2355,14 +2358,16 @@ function Find-ProcessLinksInJson {
     if ($processObj.ProcessProcedures.Activity) {
         foreach ($activity in $processObj.ProcessProcedures.Activity) {
             if ($activity.ChildProcessProcedures) {
-                # Check each child type (Note, Task, Information, etc.)
                 $childTypes = @('Note', 'Task', 'Information', 'Form', 'Guide', 'Image', 'Policy', 'Training', 'Video', 'WebLink')
 
                 foreach ($childType in $childTypes) {
                     if ($activity.ChildProcessProcedures.$childType) {
                         foreach ($child in $activity.ChildProcessProcedures.$childType) {
                             if ($child.LinkedProcessUniqueId -eq $TargetProcessUniqueId) {
-                                return $true
+                                if ($foundTypes -notcontains "Linked Process") {
+                                    $foundTypes += "Linked Process"
+                                }
+                                break
                             }
                         }
                     }
@@ -2377,11 +2382,44 @@ function Find-ProcessLinksInJson {
             $_.LinkedProcessUniqueId -eq $TargetProcessUniqueId
         })
         if ($found.Count -gt 0) {
-            return $true
+            if ($foundTypes -notcontains "Linked Process") {
+                $foundTypes += "Linked Process"
+            }
         }
     }
 
-    return $false
+    # Check Inputs
+    if ($processObj.Inputs -and $processObj.Inputs.Input) {
+        $found = @($processObj.Inputs.Input | Where-Object {
+            $_.FromProcessUniqueId -eq $TargetProcessUniqueId
+        })
+        if ($found.Count -gt 0) {
+            $foundTypes += "Process Input"
+        }
+    }
+
+    # Check Outputs
+    if ($processObj.Outputs -and $processObj.Outputs.Output) {
+        $found = @($processObj.Outputs.Output | Where-Object {
+            $_.ToProcessUniqueId -eq $TargetProcessUniqueId
+        })
+        if ($found.Count -gt 0) {
+            $foundTypes += "Process Output"
+        }
+    }
+
+    return $foundTypes
+}
+
+# Legacy function for backwards compatibility - returns boolean
+function Find-ProcessLinksInJson {
+    param(
+        [string]$ProcessJson,
+        [string]$TargetProcessUniqueId
+    )
+
+    $foundTypes = Find-ProcessDependenciesInJson -ProcessJson $ProcessJson -TargetProcessUniqueId $TargetProcessUniqueId
+    return ($foundTypes.Count -gt 0)
 }
 
 function Get-ArchivedProcessDependencies {
@@ -2432,23 +2470,29 @@ function Get-ArchivedProcessDependencies {
                                 $archivedName = $archivedProcess.ProcessModel.Name
                                 $archivedProcessJson = $archivedProcess.ProcessModel | ConvertTo-Json -Depth 20 -Compress
 
-                                # Check if this archived process has links to any process being deleted
+                                # Check if this archived process has dependencies to any process being deleted
                                 foreach ($processKey in $ProcessDeleteMap.Keys) {
                                     $processInfo = $ProcessDeleteMap[$processKey]
                                     $targetUniqueId = $processInfo.UniqueId
 
-                                    if (Find-ProcessLinksInJson -ProcessJson $archivedProcessJson -TargetProcessUniqueId $targetUniqueId) {
-                                        # Show on new line when dependency found
-                                        Write-Host ""
-                                        Write-Host "    Found: $archivedName has link to process $targetUniqueId" -ForegroundColor Yellow
+                                    # Get all dependency types found (Linked Process, Process Input, Process Output)
+                                    $foundDepTypes = Find-ProcessDependenciesInJson -ProcessJson $archivedProcessJson -TargetProcessUniqueId $targetUniqueId
 
-                                        # Add to dependencies list
-                                        $archivedDependencies += @{
-                                            Type = "Linked Process"
-                                            UniqueId = $archivedUniqueId
-                                            Name = $archivedName
-                                            ReferencedProcessKey = $processKey
-                                            IsArchived = $true
+                                    if ($foundDepTypes.Count -gt 0) {
+                                        # Add an entry for each dependency type found
+                                        foreach ($depType in $foundDepTypes) {
+                                            # Show on new line when dependency found
+                                            Write-Host ""
+                                            Write-Host "    Found: $archivedName has $depType to process $targetUniqueId" -ForegroundColor Yellow
+
+                                            # Add to dependencies list
+                                            $archivedDependencies += @{
+                                                Type = $depType
+                                                UniqueId = $archivedUniqueId
+                                                Name = $archivedName
+                                                ReferencedProcessKey = $processKey
+                                                IsArchived = $true
+                                            }
                                         }
 
                                         # Resume progress indicator
@@ -2529,19 +2573,19 @@ function Get-ActiveProcessDependencies {
                 foreach ($depType in $depArray) {
                     $typeName = $depType.Type
 
-                    # Only process "Linked Process" dependencies (active processes that reference this one)
-                    if ($typeName -eq "Linked Process" -and $depType.Dependencies) {
+                    # Process all automatic dependency types: Linked Process, Process Input, Process Output
+                    if (($typeName -eq "Linked Process" -or $typeName -eq "Process Input" -or $typeName -eq "Process Output") -and $depType.Dependencies) {
                         foreach ($dep in $depType.Dependencies) {
                             $depUniqueId = $dep.UniqueId
                             $depName = $dep.Name
 
                             # Show on new line when dependency found
                             Write-Host ""
-                            Write-Host "    Found: $depName has link to process $targetUniqueId" -ForegroundColor Yellow
+                            Write-Host "    Found: $depName has $typeName to process $targetUniqueId" -ForegroundColor Yellow
 
                             # Add to dependencies list
                             $activeDependencies += @{
-                                Type = "Linked Process"
+                                Type = $typeName
                                 UniqueId = $depUniqueId
                                 Name = $depName
                                 ReferencedProcessKey = $processKey
@@ -2737,6 +2781,105 @@ function Remove-ProcessLinksFromJson {
     }
 }
 
+# Object-based version that works directly with PSObjects (avoids double serialization)
+function Remove-ProcessLinksFromObject {
+    param(
+        [object]$ProcessObj,
+        [string]$TargetProcessUniqueId
+    )
+
+    $linksRemoved = 0
+    Write-Host "    DEBUG: Looking for links to remove. Target UniqueId: $TargetProcessUniqueId" -ForegroundColor Magenta
+
+    # Remove from ProcessProcedures.ProcessLink
+    if ($ProcessObj.ProcessProcedures.ProcessLink) {
+        $originalCount = @($ProcessObj.ProcessProcedures.ProcessLink).Count
+        Write-Host "    DEBUG: Found $originalCount ProcessLink(s)" -ForegroundColor Magenta
+        foreach ($link in $ProcessObj.ProcessProcedures.ProcessLink) {
+            Write-Host "      - Link to: $($link.LinkedProcessUniqueId) ($($link.LinkedProcessName))" -ForegroundColor Gray
+        }
+        $ProcessObj.ProcessProcedures.ProcessLink = @($ProcessObj.ProcessProcedures.ProcessLink | Where-Object {
+            $_.LinkedProcessUniqueId -ne $TargetProcessUniqueId
+        })
+        $newCount = @($ProcessObj.ProcessProcedures.ProcessLink).Count
+        $removed = $originalCount - $newCount
+        if ($removed -gt 0) {
+            Write-Host "    DEBUG: Removed $removed ProcessLink(s)" -ForegroundColor Yellow
+        }
+        $linksRemoved += $removed
+    } else {
+        Write-Host "    DEBUG: No ProcessLinks found in this process" -ForegroundColor Gray
+    }
+
+    # Remove from ProcessProcedures.OrphanProcessLink
+    if ($ProcessObj.ProcessProcedures.OrphanProcessLink) {
+        $originalCount = @($ProcessObj.ProcessProcedures.OrphanProcessLink).Count
+        $ProcessObj.ProcessProcedures.OrphanProcessLink = @($ProcessObj.ProcessProcedures.OrphanProcessLink | Where-Object {
+            $_.LinkedProcessUniqueId -ne $TargetProcessUniqueId
+        })
+        $newCount = @($ProcessObj.ProcessProcedures.OrphanProcessLink).Count
+        $linksRemoved += ($originalCount - $newCount)
+    }
+
+    # Recursively clean ChildProcessProcedures in Activities
+    if ($ProcessObj.ProcessProcedures.Activity) {
+        foreach ($activity in $ProcessObj.ProcessProcedures.Activity) {
+            if ($activity.ChildProcessProcedures) {
+                $childTypes = @('Note', 'Task', 'Information', 'Form', 'Guide', 'Image', 'Policy', 'Training', 'Video', 'WebLink')
+
+                foreach ($childType in $childTypes) {
+                    if ($activity.ChildProcessProcedures.$childType) {
+                        foreach ($child in $activity.ChildProcessProcedures.$childType) {
+                            if ($child.LinkedProcessUniqueId -eq $TargetProcessUniqueId) {
+                                $child.LinkedProcessId = $null
+                                $child.LinkedProcessUniqueId = $null
+                                $child.LinkedProcessName = $null
+                                $child.LinkedProcessDisplayName = $null
+                                $child.LinkedProcessGroupId = $null
+                                $child.LinkedProcessGroupName = $null
+                                $child.LinkedProcessGroupUniqueId = $null
+                                $linksRemoved++
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    # Orphan Decision node links
+    if ($ProcessObj.ProcessProcedures.Decision) {
+        Write-Host "    DEBUG: Found $(@($ProcessObj.ProcessProcedures.Decision).Count) Decision(s)" -ForegroundColor Magenta
+        foreach ($decision in $ProcessObj.ProcessProcedures.Decision) {
+            Write-Host "      - Decision linked to: $($decision.LinkedProcessUniqueId) ($($decision.LinkedProcessDisplayName))" -ForegroundColor Gray
+            if ($decision.LinkedProcessUniqueId -eq $TargetProcessUniqueId) {
+                Write-Host "      - MATCH FOUND! Orphaning this decision link" -ForegroundColor Yellow
+                $decision.LinkedProcessId = $null
+                $decision.LinkedProcessUniqueId = $null
+                $decision.LinkedProcessName = $null
+                $decision.LinkedProcessGroupId = $null
+                $decision.LinkedProcessGroupName = $null
+                $decision.LinkedProcessGroupUniqueId = $null
+
+                if ($decision.DecisionLinkType -eq 4) {
+                    $decision.DecisionLinkType = 7
+                }
+
+                $linksRemoved++
+            }
+        }
+    } else {
+        Write-Host "    DEBUG: No Decisions found in this process" -ForegroundColor Gray
+    }
+
+    Write-Host "    DEBUG: Total links removed from this process: $linksRemoved" -ForegroundColor Magenta
+
+    return @{
+        CleanedObject = $ProcessObj
+        LinksRemoved = $linksRemoved
+    }
+}
+
 function Remove-InputOutputReferencesFromJson {
     param(
         [string]$ProcessJson,
@@ -2781,6 +2924,45 @@ function Remove-InputOutputReferencesFromJson {
     }
 }
 
+# Object-based version that works directly with PSObjects (avoids double serialization)
+function Remove-InputOutputReferencesFromObject {
+    param(
+        [object]$ProcessObj,
+        [string]$TargetProcessUniqueId
+    )
+
+    $referencesRemoved = 0
+
+    # Remove from Inputs - filter out inputs where FromProcessUniqueId matches target
+    if ($ProcessObj.Inputs -and $ProcessObj.Inputs.Input) {
+        $originalCount = @($ProcessObj.Inputs.Input).Count
+        $ProcessObj.Inputs.Input = @($ProcessObj.Inputs.Input | Where-Object {
+            $_.FromProcessUniqueId -ne $TargetProcessUniqueId
+        })
+        $newCount = @($ProcessObj.Inputs.Input).Count
+        $referencesRemoved += ($originalCount - $newCount)
+
+        Write-Host "    Removed $($originalCount - $newCount) input reference(s)" -ForegroundColor Gray
+    }
+
+    # Remove from Outputs - filter out outputs where ToProcessUniqueId matches target
+    if ($ProcessObj.Outputs -and $ProcessObj.Outputs.Output) {
+        $originalCount = @($ProcessObj.Outputs.Output).Count
+        $ProcessObj.Outputs.Output = @($ProcessObj.Outputs.Output | Where-Object {
+            $_.ToProcessUniqueId -ne $TargetProcessUniqueId
+        })
+        $newCount = @($ProcessObj.Outputs.Output).Count
+        $referencesRemoved += ($originalCount - $newCount)
+
+        Write-Host "    Removed $($originalCount - $newCount) output reference(s)" -ForegroundColor Gray
+    }
+
+    return @{
+        CleanedObject = $ProcessObj
+        ReferencesRemoved = $referencesRemoved
+    }
+}
+
 function Update-ProcessAndPublish {
     param(
         [string]$SiteURL,
@@ -2800,32 +2982,45 @@ function Update-ProcessAndPublish {
             return $false
         }
 
-        $processJson = $processData.processJson | ConvertTo-Json -Depth 20 -Compress
-        $processRevisionEditId = $processData.processJson.ProcessRevisionEditId
-        $majorVersion = [int]($processData.processJson.Version.Split('.')[0])
+        # Keep as object for manipulation, convert to JSON string only at the end
+        $processObj = $processData.processJson
+        $processRevisionEditId = $processObj.ProcessRevisionEditId
+        $majorVersion = [int]($processObj.Version.Split('.')[0])
         $wasPreviouslyPublished = $majorVersion -gt 0
 
-        # Step 2: Remove links/references from JSON based on dependency type
+        # Step 2: Remove links/references from object based on dependency type
+        Write-Host "  DEBUG: Processing process '$($processObj.Name)' (Version: $($processObj.Version), WasPreviouslyPublished: $wasPreviouslyPublished)" -ForegroundColor Magenta
+        Write-Host "  DEBUG: DependencyType = $DependencyType, TargetProcessUniqueId = $TargetProcessUniqueId" -ForegroundColor Magenta
+
         if ($DependencyType -eq "Process Input" -or $DependencyType -eq "Process Output") {
-            $result = Remove-InputOutputReferencesFromJson -ProcessJson $processJson -TargetProcessUniqueId $TargetProcessUniqueId
+            $result = Remove-InputOutputReferencesFromObject -ProcessObj $processObj -TargetProcessUniqueId $TargetProcessUniqueId
 
             if ($result.ReferencesRemoved -eq 0) {
+                Write-Host "  DEBUG: No references found to remove - returning early" -ForegroundColor Gray
                 return $true
             }
+            Write-Host "  DEBUG: Removed $($result.ReferencesRemoved) references - proceeding to update" -ForegroundColor Yellow
+            $cleanedProcessObj = $result.CleanedObject
         }
         else {
             # Default: Linked Process removal
-            $result = Remove-ProcessLinksFromJson -ProcessJson $processJson -TargetProcessUniqueId $TargetProcessUniqueId
+            $result = Remove-ProcessLinksFromObject -ProcessObj $processObj -TargetProcessUniqueId $TargetProcessUniqueId
 
             if ($result.LinksRemoved -eq 0) {
+                Write-Host "  DEBUG: No links found to remove - returning early" -ForegroundColor Gray
                 return $true
             }
+            Write-Host "  DEBUG: Removed $($result.LinksRemoved) links - proceeding to update" -ForegroundColor Yellow
+            $cleanedProcessObj = $result.CleanedObject
         }
 
         # Step 3: Update process with cleaned JSON
+        # ProcessJson must be a JSON string (the API expects a string value, not an object)
+        # The string will be properly escaped when the outer body is serialized
+        $cleanedJsonString = $cleanedProcessObj | ConvertTo-Json -Depth 20 -Compress
 
         $updateBody = @{
-            ProcessJson = $result.CleanedJson
+            ProcessJson = $cleanedJsonString
             ChangeDescription = ""
             DoSubmitForApproval = $false
             DoPublish = $false
@@ -2854,12 +3049,12 @@ function Update-ProcessAndPublish {
             $newProcessRevisionEditId = $updatedProcessData.processJson.ProcessRevisionEditId
 
             if ($ApprovalsEnabled) {
-                # Get the updated process JSON with new ProcessRevisionEditId
-                $updatedProcessJson = $updatedProcessData.processJson | ConvertTo-Json -Depth 20 -Compress
+                # Get the updated process JSON string for submission
+                $updatedProcessJsonString = $updatedProcessData.processJson | ConvertTo-Json -Depth 20 -Compress
 
                 # Submit for approval
                 $submitBody = @{
-                    ProcessJson = $updatedProcessJson
+                    ProcessJson = $updatedProcessJsonString
                     ChangeDescription = "Automated dependency removal"
                     DoSubmitForApproval = $true
                     DoPublish = $false

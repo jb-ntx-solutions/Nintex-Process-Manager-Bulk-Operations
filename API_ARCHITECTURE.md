@@ -204,6 +204,169 @@ When removing process dependencies, Nintex Process Manager handles different lin
 
 ---
 
+## Complete Dependency Removal Example
+
+This section shows a complete example of removing all dependency types from a process.
+
+### Scenario
+
+We want to delete **"CSM Onboarding Process"** (UniqueId: `b8631d0f-b7f8-44bb-80ed-f89886551c42`).
+
+The CheckProcessDependencies API returns the following processes that reference it:
+
+```json
+[
+    {
+        "Type": "Linked Process",
+        "Dependencies": [
+            { "Name": "Sqeunce Approve", "UniqueId": "f5698de9-1956-4095-9d6f-edaf6e28f022" },
+            { "Name": "Sqeunce Approve", "UniqueId": "f5698de9-1956-4095-9d6f-edaf6e28f022" }
+        ]
+    },
+    {
+        "Type": "Process Input",
+        "Dependencies": [
+            { "Name": "Sqeunce Approve", "UniqueId": "f5698de9-1956-4095-9d6f-edaf6e28f022" }
+        ]
+    },
+    {
+        "Type": "Process Output",
+        "Dependencies": [
+            { "Name": "Sqeunce Approve", "UniqueId": "f5698de9-1956-4095-9d6f-edaf6e28f022" }
+        ]
+    }
+]
+```
+
+### Dependency Types and Locations
+
+The "Sqeunce Approve" process has **four different references** to "CSM Onboarding Process":
+
+| Type | Location in JSON | UniqueId Field | Action |
+|------|------------------|----------------|--------|
+| ProcessLink | `ProcessProcedures.ProcessLink[]` | `LinkedProcessUniqueId` | **Remove from array** |
+| Decision | `ProcessProcedures.Decision[]` | `LinkedProcessUniqueId` | **Orphan** (clear fields, set DecisionLinkType=7) |
+| Input | `Inputs.Input[]` | `FromProcessUniqueId` | **Remove from array** |
+| Output | `Outputs.Output[]` | `ToProcessUniqueId` | **Remove from array** |
+
+### BEFORE: Process JSON with Dependencies
+
+```json
+{
+    "ProcessProcedures": {
+        "Decision": [
+            {
+                "Id": 20646,
+                "UniqueId": "dd79cc66-6391-4601-95da-a9eafe4dacd2",
+                "LinkedProcessId": 1472,
+                "LinkedProcessUniqueId": "b8631d0f-b7f8-44bb-80ed-f89886551c42",
+                "LinkedProcessName": "CSM Onboarding Process",
+                "LinkedProcessDisplayName": "CSM Onboarding Process",
+                "DecisionLinkType": 4
+            }
+        ],
+        "ProcessLink": [
+            {
+                "Id": 20649,
+                "LinkedProcessUniqueId": "04e43b88-709e-4bbd-a1b1-ac38d92167a4",
+                "LinkedProcessName": "Other Process"
+            },
+            {
+                "Id": 20653,
+                "LinkedProcessUniqueId": "b8631d0f-b7f8-44bb-80ed-f89886551c42",
+                "LinkedProcessName": "CSM Onboarding Process"
+            }
+        ]
+    },
+    "Inputs": {
+        "Input": [
+            {
+                "Id": 994,
+                "FromProcessUniqueId": "b8631d0f-b7f8-44bb-80ed-f89886551c42",
+                "FromProcess": "CSM Onboarding Process"
+            }
+        ]
+    },
+    "Outputs": {
+        "Output": [
+            {
+                "Id": 1040,
+                "ToProcessUniqueId": "b8631d0f-b7f8-44bb-80ed-f89886551c42",
+                "ToProcess": "CSM Onboarding Process"
+            }
+        ]
+    },
+    "LinkedStakeholders": {
+        "LinkedStakeholder": [
+            { "ProcessId": 1502, "Link": "Other Process" },
+            { "ProcessId": 1472, "Link": "CSM Onboarding Process" }
+        ]
+    }
+}
+```
+
+### AFTER: Process JSON with Dependencies Removed
+
+```json
+{
+    "ProcessProcedures": {
+        "Decision": [
+            {
+                "Id": 20646,
+                "UniqueId": "dd79cc66-6391-4601-95da-a9eafe4dacd2",
+                "LinkedProcessId": null,
+                "LinkedProcessUniqueId": null,
+                "LinkedProcessName": null,
+                "LinkedProcessDisplayName": "CSM Onboarding Process",
+                "DecisionLinkType": 7
+            }
+        ],
+        "ProcessLink": [
+            {
+                "Id": 20649,
+                "LinkedProcessUniqueId": "04e43b88-709e-4bbd-a1b1-ac38d92167a4",
+                "LinkedProcessName": "Other Process"
+            }
+        ]
+    },
+    "Inputs": {
+        "Input": []
+    },
+    "Outputs": {
+        "Output": []
+    },
+    "LinkedStakeholders": {
+        "LinkedStakeholder": [
+            { "ProcessId": 1502, "Link": "Other Process" },
+            { "ProcessId": 1472, "Link": "CSM Onboarding Process" }
+        ]
+    }
+}
+```
+
+### Key Changes Made
+
+1. **Decision** (orphaned):
+   - `LinkedProcessId` → `null`
+   - `LinkedProcessUniqueId` → `null`
+   - `LinkedProcessName` → `null`
+   - `LinkedProcessDisplayName` → **KEPT** (`"CSM Onboarding Process"`)
+   - `DecisionLinkType` → `7` (was `4`)
+
+2. **ProcessLink** (removed):
+   - Entry with `LinkedProcessUniqueId: "b8631d0f-..."` completely removed from array
+
+3. **Input** (removed):
+   - Entry with `FromProcessUniqueId: "b8631d0f-..."` completely removed from array
+
+4. **Output** (removed):
+   - Entry with `ToProcessUniqueId: "b8631d0f-..."` completely removed from array
+
+5. **LinkedStakeholders** (preserved):
+   - All entries kept, even the one referencing the deleted process
+
+---
+
 ## Update Process APIs
 
 ### Update Active Process
@@ -212,11 +375,19 @@ When removing process dependencies, Nintex Process Manager handles different lin
 
 **Method:** PUT
 
+**Required Headers:**
+```
+Authorization: Bearer {token}
+Content-Type: application/json
+Accept: application/json
+X-Requested-With: XMLHttpRequest
+```
+
 **Body Structure:**
 ```json
 {
-  "ProcessJson": "{...json string...}",
-  "ChangeDescription": "Description of changes",
+  "ProcessJson": "{\"Id\":1476,\"UniqueId\":\"f5698de9-1956-4095-9d6f-edaf6e28f022\",\"Name\":\"Process Name\",...}",
+  "ChangeDescription": "",
   "DoSubmitForApproval": false,
   "DoPublish": false,
   "SuppressChangeNotification": false,
@@ -229,10 +400,81 @@ When removing process dependencies, Nintex Process Manager handles different lin
 }
 ```
 
+**CRITICAL: ProcessJson Field Format**
+
+The `ProcessJson` field must be a **JSON-encoded string**, NOT an object. This means:
+- The value is a string that contains escaped JSON
+- Quotes inside the ProcessJson value are escaped as `\"`
+- The outer body is then serialized, which properly escapes the inner quotes
+
+**Correct Format (outer JSON with inner JSON string):**
+```json
+{"ProcessJson":"{\"Id\":1476,\"UniqueId\":\"f5698de9-1956-4095-9d6f-edaf6e28f022\"}","ChangeDescription":""}
+```
+
+**WRONG Format (ProcessJson as object - will not save changes):**
+```json
+{"ProcessJson":{"Id":1476,"UniqueId":"f5698de9-1956-4095-9d6f-edaf6e28f022"},"ChangeDescription":""}
+```
+
+**PowerShell Implementation:**
+```powershell
+# Step 1: Get the process data (returns object)
+$processData = Invoke-ApiGet -Url "$SiteURL/Api/v1/Processes/$processUniqueId" -Token $Token
+$processObj = $processData.processJson
+
+# Step 2: Make changes to the object
+$processObj.Name = "New Name"
+# ... other modifications ...
+
+# Step 3: Convert the process object to a JSON STRING
+$processJsonString = $processObj | ConvertTo-Json -Depth 20 -Compress
+
+# Step 4: Build the request body with ProcessJson as a STRING
+$updateBody = @{
+    ProcessJson = $processJsonString  # This is a string!
+    ChangeDescription = ""
+    DoSubmitForApproval = $false
+    DoPublish = $false
+    SuppressChangeNotification = $false
+    SharedActivityCollectionEditModel = @{
+        ActivitiesToDelete = @()
+        ActivitiesToShare = @()
+        ActivitiesToUnlink = @()
+    }
+    VariantConnectionChangeStates = @()
+}
+
+# Step 5: Serialize the entire body (ProcessJson string will be properly escaped)
+$jsonBody = $updateBody | ConvertTo-Json -Depth 20
+
+# Step 6: Send the request
+$response = Invoke-RestMethod -Uri $url -Method Put -Headers $headers -Body $jsonBody
+```
+
+**Working cURL Example:**
+```bash
+curl 'https://demo.promapp.com/{tenantId}/Api/v1/Processes/{processUniqueId}' \
+  -X 'PUT' \
+  -H 'Authorization: Bearer {token}' \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'X-Requested-With: XMLHttpRequest' \
+  --data-raw '{"ProcessJson":"{\"Id\":1476,\"UniqueId\":\"f5698de9-1956-4095-9d6f-edaf6e28f022\",\"Name\":\"Process Name\",\"StateId\":1,\"Objective\":\"...\",\"ProcessProcedures\":{...},\"Version\":\"4.0\",\"ProcessRevisionEditId\":8970,...}","ChangeDescription":"","DoSubmitForApproval":false,"DoPublish":false,"SuppressChangeNotification":false,"SharedActivityCollectionEditModel":{"ActivitiesToDelete":[],"ActivitiesToShare":[],"ActivitiesToUnlink":[]},"VariantConnectionChangeStates":[]}'
+```
+
 **Important Notes:**
-- `ProcessJson` must be a JSON string (use `ConvertTo-Json -Depth 20 -Compress`)
-- Depth 20 is critical for complex process structures
-- After updating, may need to publish separately
+- `ProcessJson` must be a JSON **string** (use `ConvertTo-Json -Depth 20 -Compress` on the process object first)
+- Then the entire body is serialized with `ConvertTo-Json -Depth 20` (this properly escapes the inner JSON string)
+- Depth 20 is critical for complex process structures with nested activities
+- After updating, may need to publish separately (see Publishing APIs)
+- The API may return 200 OK but silently ignore changes if ProcessJson format is wrong
+
+**Common Mistakes:**
+1. Passing ProcessJson as an object instead of a string
+2. Using insufficient depth (< 20) which truncates nested structures
+3. Double-serializing the ProcessJson (serializing it twice)
+4. Not including all required fields in the body
 
 ---
 
