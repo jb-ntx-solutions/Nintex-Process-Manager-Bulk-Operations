@@ -1,5 +1,5 @@
 # Nintex Process Manager Bulk Operations Script
-# Version 3.0 (Dry-Run Preview Mode)
+# Version 4.0 (Archived Document Deletion)
 # Supports: Archive, Restore, Update Location, Update Ownership, and Delete operations
 
 #Requires -Version 5.1
@@ -166,23 +166,6 @@ function Invoke-ApiPut {
         }
 
         $jsonBody = $Body | ConvertTo-Json -Depth 20
-
-        # DEBUG: Log the request details
-        Write-Host "`n=== DEBUG: PUT Request Details ===" -ForegroundColor Magenta
-        Write-Host "URL: $Url" -ForegroundColor Cyan
-        Write-Host "Headers:" -ForegroundColor Cyan
-        $headers.GetEnumerator() | ForEach-Object { Write-Host "  $($_.Key): $($_.Value)" -ForegroundColor Gray }
-        Write-Host "`nBody (first 2000 chars):" -ForegroundColor Cyan
-        $bodyPreview = if ($jsonBody.Length -gt 2000) { $jsonBody.Substring(0, 2000) + "..." } else { $jsonBody }
-        Write-Host $bodyPreview -ForegroundColor Gray
-        Write-Host "`nBody Length: $($jsonBody.Length) characters" -ForegroundColor Cyan
-
-        # Save full body to file for Postman testing
-        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss_fff"
-        $debugFile = "DEBUG_PUT_Request_$timestamp.json"
-        $jsonBody | Out-File -FilePath $debugFile -Encoding UTF8
-        Write-Host "Full body saved to: $debugFile" -ForegroundColor Yellow
-        Write-Host "=================================`n" -ForegroundColor Magenta
 
         # Invoke-RestMethod throws on HTTP errors, so if this succeeds, we got a 2xx response
         # No -StatusCodeVariable needed (not available in PowerShell 5.1)
@@ -2659,6 +2642,113 @@ function Get-AllArchivedProcesses {
     return $allArchivedProcesses
 }
 
+function Get-AllArchivedDocuments {
+    param(
+        [string]$SiteURL,
+        [string]$Token
+    )
+
+    Write-Host "  Fetching all archived documents from site..." -ForegroundColor Gray
+
+    $allArchivedDocuments = @()
+    $page = 1
+    $pageSize = 20
+    $hasMore = $true
+
+    # Fetch all archived documents with pagination
+    while ($hasMore) {
+        try {
+            # ListType=Archived for archived documents
+            $listUrl = "$SiteURL/bff/document/api/v1/documents?Page=$page&PageSize=$pageSize&ListType=Archived&DocumentType=All"
+            $response = Invoke-ApiGet -Url $listUrl -Token $Token
+
+            if ($response -and $response.items -and $response.items.Count -gt 0) {
+                Write-Host "  Page $page : Found $($response.items.Count) archived documents" -ForegroundColor Gray
+
+                # Add each document to the list with both ID and name for display
+                foreach ($item in $response.items) {
+                    $allArchivedDocuments += @{
+                        DocumentId = $item.documentId
+                        DocumentUniqueId = $item.documentUniqueId
+                        DocumentName = $item.documentName
+                        PrimaryGroupName = $item.primaryGroupName
+                        ArchivedDate = $item.archivedDate
+                        ArchivedByUserName = $item.archivedByUserName
+                    }
+                }
+
+                # Check if there are more pages
+                if ($response.items.Count -lt $pageSize) {
+                    $hasMore = $false
+                } else {
+                    $page++
+                }
+            } else {
+                $hasMore = $false
+            }
+        }
+        catch {
+            Write-Host "  Error fetching archived documents: $($_.Exception.Message)" -ForegroundColor Red
+            $hasMore = $false
+        }
+    }
+
+    Write-Host "  Total archived documents found: $($allArchivedDocuments.Count)" -ForegroundColor Green
+    return $allArchivedDocuments
+}
+
+function Delete-ArchivedDocuments {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [array]$DocumentIds
+    )
+
+    if ($DocumentIds.Count -eq 0) {
+        Write-Host "  No documents to delete" -ForegroundColor Yellow
+        return @{ Success = $true; Deleted = 0; Failed = 0 }
+    }
+
+    $deleted = 0
+    $failed = 0
+    $batchSize = 50  # Delete in batches of 50
+
+    # Process in batches
+    for ($i = 0; $i -lt $DocumentIds.Count; $i += $batchSize) {
+        $batch = $DocumentIds[$i..([Math]::Min($i + $batchSize - 1, $DocumentIds.Count - 1))]
+
+        try {
+            $deleteUrl = "$SiteURL/bff/document/api/v1/documents/bulk"
+            $deleteBody = @{
+                documentIds = $batch
+            }
+
+            $headers = @{
+                "Authorization" = "Bearer $Token"
+                "Content-Type" = "application/json"
+                "Accept" = "application/json"
+                "X-Requested-With" = "XMLHttpRequest"
+            }
+
+            $jsonBody = $deleteBody | ConvertTo-Json -Depth 10
+            $response = Invoke-RestMethod -Uri $deleteUrl -Method Delete -Headers $headers -Body $jsonBody -ErrorAction Stop
+
+            $deleted += $batch.Count
+            Write-Host "`r  Deleted $deleted of $($DocumentIds.Count) documents..." -NoNewline -ForegroundColor Gray
+        }
+        catch {
+            $failed += $batch.Count
+            Write-Host "`n  Error deleting batch: $($_.Exception.Message)" -ForegroundColor Red
+        }
+
+        # Small delay between batches
+        Start-Sleep -Milliseconds 200
+    }
+
+    Write-Host ""  # New line after progress
+    return @{ Success = ($failed -eq 0); Deleted = $deleted; Failed = $failed }
+}
+
 function Remove-ProcessLinksFromJson {
     param(
         [string]$ProcessJson,
@@ -2789,26 +2879,15 @@ function Remove-ProcessLinksFromObject {
     )
 
     $linksRemoved = 0
-    Write-Host "    DEBUG: Looking for links to remove. Target UniqueId: $TargetProcessUniqueId" -ForegroundColor Magenta
 
     # Remove from ProcessProcedures.ProcessLink
     if ($ProcessObj.ProcessProcedures.ProcessLink) {
         $originalCount = @($ProcessObj.ProcessProcedures.ProcessLink).Count
-        Write-Host "    DEBUG: Found $originalCount ProcessLink(s)" -ForegroundColor Magenta
-        foreach ($link in $ProcessObj.ProcessProcedures.ProcessLink) {
-            Write-Host "      - Link to: $($link.LinkedProcessUniqueId) ($($link.LinkedProcessName))" -ForegroundColor Gray
-        }
         $ProcessObj.ProcessProcedures.ProcessLink = @($ProcessObj.ProcessProcedures.ProcessLink | Where-Object {
             $_.LinkedProcessUniqueId -ne $TargetProcessUniqueId
         })
         $newCount = @($ProcessObj.ProcessProcedures.ProcessLink).Count
-        $removed = $originalCount - $newCount
-        if ($removed -gt 0) {
-            Write-Host "    DEBUG: Removed $removed ProcessLink(s)" -ForegroundColor Yellow
-        }
-        $linksRemoved += $removed
-    } else {
-        Write-Host "    DEBUG: No ProcessLinks found in this process" -ForegroundColor Gray
+        $linksRemoved += ($originalCount - $newCount)
     }
 
     # Remove from ProcessProcedures.OrphanProcessLink
@@ -2849,11 +2928,8 @@ function Remove-ProcessLinksFromObject {
 
     # Orphan Decision node links
     if ($ProcessObj.ProcessProcedures.Decision) {
-        Write-Host "    DEBUG: Found $(@($ProcessObj.ProcessProcedures.Decision).Count) Decision(s)" -ForegroundColor Magenta
         foreach ($decision in $ProcessObj.ProcessProcedures.Decision) {
-            Write-Host "      - Decision linked to: $($decision.LinkedProcessUniqueId) ($($decision.LinkedProcessDisplayName))" -ForegroundColor Gray
             if ($decision.LinkedProcessUniqueId -eq $TargetProcessUniqueId) {
-                Write-Host "      - MATCH FOUND! Orphaning this decision link" -ForegroundColor Yellow
                 $decision.LinkedProcessId = $null
                 $decision.LinkedProcessUniqueId = $null
                 $decision.LinkedProcessName = $null
@@ -2868,11 +2944,7 @@ function Remove-ProcessLinksFromObject {
                 $linksRemoved++
             }
         }
-    } else {
-        Write-Host "    DEBUG: No Decisions found in this process" -ForegroundColor Gray
     }
-
-    Write-Host "    DEBUG: Total links removed from this process: $linksRemoved" -ForegroundColor Magenta
 
     return @{
         CleanedObject = $ProcessObj
@@ -2994,10 +3066,6 @@ function Update-ProcessAndPublish {
         # Step 2: Remove ALL types of references from the process object
         # The CheckProcessDependencies API may not accurately report the type (e.g., may report "Linked Process"
         # when the actual reference is in Outputs), so we check ALL locations regardless of reported type
-        Write-Host "  DEBUG: Processing process '$($processObj.Name)' (Version: $($processObj.Version), WasPreviouslyPublished: $wasPreviouslyPublished, IsInProgress: $isInProgress)" -ForegroundColor Magenta
-        Write-Host "  DEBUG: DependencyType reported = $DependencyType, TargetProcessUniqueId = $TargetProcessUniqueId" -ForegroundColor Magenta
-        Write-Host "  DEBUG: Checking ALL reference locations (ProcessLinks, Decisions, Inputs, Outputs)..." -ForegroundColor Magenta
-
         $totalReferencesRemoved = 0
         $needsPublishOnly = $false
 
@@ -3011,19 +3079,13 @@ function Update-ProcessAndPublish {
         $totalReferencesRemoved += $ioResult.ReferencesRemoved
         $cleanedProcessObj = $ioResult.CleanedObject
 
-        Write-Host "  DEBUG: Total references removed: $totalReferencesRemoved (Links: $($linkResult.LinksRemoved), I/O: $($ioResult.ReferencesRemoved))" -ForegroundColor Magenta
-
         if ($totalReferencesRemoved -eq 0) {
             if ($isInProgress -and $wasPreviouslyPublished) {
                 # No references found but process is in-progress - still need to publish to finalize removal
-                Write-Host "  DEBUG: No references found to remove, but process is in-progress (v$($processObj.Version)) - will publish to finalize dependency removal" -ForegroundColor Yellow
                 $needsPublishOnly = $true
             } else {
-                Write-Host "  DEBUG: No references found to remove - returning early" -ForegroundColor Gray
                 return $true
             }
-        } else {
-            Write-Host "  DEBUG: Removed $totalReferencesRemoved total references - proceeding to update" -ForegroundColor Yellow
         }
 
         # Step 3: Update process with cleaned JSON (skip if only publishing)
@@ -3052,8 +3114,6 @@ function Update-ProcessAndPublish {
             if (-not $updateResult -or -not $updateResult.Success) {
                 return $false
             }
-        } else {
-            Write-Host "  DEBUG: Skipping update step - proceeding directly to publish" -ForegroundColor Yellow
         }
 
         # Step 4: Publish if needed (or if needsPublishOnly is true)
@@ -4504,17 +4564,19 @@ function Get-SourceType {
         return "CSV"
     }
 
-    # Mode 5 (Bulk Delete): CSV, Group, or Archived
+    # Mode 5 (Bulk Delete): CSV, Group, Archived Processes, or Archived Documents
     if ($Mode -eq 5) {
         Write-Host "`nSelect Source:" -ForegroundColor Yellow
         Write-Host "  [1] CSV File" -ForegroundColor White
         Write-Host "  [2] Process/Document Group" -ForegroundColor White
         Write-Host "  [3] All Archived Processes" -ForegroundColor White
+        Write-Host "  [4] All Archived Documents" -ForegroundColor White
         $choice = Read-Host "Choice"
 
         switch ($choice) {
             '2' { return "Group" }
             '3' { return "Archived" }
+            '4' { return "ArchivedDocuments" }
             default { return "CSV" }
         }
     }
@@ -4576,7 +4638,7 @@ Clear-Host
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "  NINTEX PROCESS MANAGER BULK OPERATIONS" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  Version 3.0 (Dry-Run Preview Mode)" -ForegroundColor Yellow
+Write-Host "  Version 4.0 (Archived Document Deletion)" -ForegroundColor Yellow
 Write-Host "  Script loaded: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Yellow
 Write-Host ""
 
@@ -4707,6 +4769,61 @@ while ($running) {
                     Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -TempGroupName $tempGroupName -CurrentUsername $config.Username -WhatIf
                 } else {
                     Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -TempGroupName $tempGroupName -CurrentUsername $config.Username
+                }
+            } elseif ($sourceType -eq "ArchivedDocuments") {
+                # Handle bulk delete of all archived documents
+                Write-Host "`n=== BULK DELETE ALL ARCHIVED DOCUMENTS ===" -ForegroundColor Cyan
+
+                # Fetch all archived documents
+                Write-Host "`nFetching archived documents..." -ForegroundColor Cyan
+                $archivedDocs = Get-AllArchivedDocuments -SiteURL $config.SiteURL -Token $token
+
+                if ($archivedDocs.Count -eq 0) {
+                    Write-Host "No archived documents found." -ForegroundColor Yellow
+                } else {
+                    # Display summary
+                    Write-Host "`nFound $($archivedDocs.Count) archived document(s):" -ForegroundColor Yellow
+                    Write-Host ""
+
+                    # Show first 20 documents as preview
+                    $previewCount = [Math]::Min(20, $archivedDocs.Count)
+                    for ($i = 0; $i -lt $previewCount; $i++) {
+                        $doc = $archivedDocs[$i]
+                        Write-Host "  - $($doc.DocumentName) (Group: $($doc.PrimaryGroupName))" -ForegroundColor White
+                    }
+                    if ($archivedDocs.Count -gt 20) {
+                        Write-Host "  ... and $($archivedDocs.Count - 20) more documents" -ForegroundColor Gray
+                    }
+
+                    if ($isDryRun) {
+                        Write-Host "`n[DRY RUN] Would delete $($archivedDocs.Count) archived documents" -ForegroundColor Yellow
+                    } else {
+                        # Multiple confirmations for safety
+                        Write-Host "`n========================================" -ForegroundColor Red
+                        Write-Host "  WARNING: DESTRUCTIVE OPERATION" -ForegroundColor Red
+                        Write-Host "========================================" -ForegroundColor Red
+                        Write-Host "This will PERMANENTLY DELETE all $($archivedDocs.Count) archived documents." -ForegroundColor Red
+                        Write-Host "This action CANNOT be undone." -ForegroundColor Red
+                        Write-Host ""
+
+                        $confirm1 = Read-Host "Type 'DELETE ALL DOCUMENTS' to confirm"
+                        if ($confirm1 -eq 'DELETE ALL DOCUMENTS') {
+                            Write-Host "`nDeleting archived documents..." -ForegroundColor Cyan
+
+                            # Extract document IDs for deletion
+                            $documentIds = $archivedDocs | ForEach-Object { $_.DocumentId }
+
+                            $result = Delete-ArchivedDocuments -SiteURL $config.SiteURL -Token $token -DocumentIds $documentIds
+
+                            Write-Host "`n=== Deletion Summary ===" -ForegroundColor Cyan
+                            Write-Host "Documents deleted: $($result.Deleted)" -ForegroundColor Green
+                            if ($result.Failed -gt 0) {
+                                Write-Host "Documents failed: $($result.Failed)" -ForegroundColor Red
+                            }
+                        } else {
+                            Write-Host "Operation cancelled." -ForegroundColor Yellow
+                        }
+                    }
                 }
             } else {
                 $group = Select-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Group to Delete (WARNING: Destructive!)"

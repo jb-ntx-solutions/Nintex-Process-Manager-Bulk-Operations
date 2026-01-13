@@ -687,6 +687,103 @@ foreach ($proc in $batchData.data) {
 
 ---
 
+## Document APIs
+
+### List Archived Documents (Paginated)
+
+**Endpoint:** `/bff/document/api/v1/documents`
+
+**Method:** GET
+
+**Query Parameters:**
+- `Page`: Page number (starts at 1)
+- `PageSize`: Number of items per page (typically 20)
+- `ListType`: Document state filter (`Archived` for archived documents)
+- `DocumentType`: Document type filter (`All` for all types)
+
+**Usage:**
+```powershell
+$url = "$SiteURL/bff/document/api/v1/documents?Page=1&PageSize=20&ListType=Archived&DocumentType=All"
+$response = Invoke-ApiGet -Url $url -Token $Token
+```
+
+**Response Structure:**
+```json
+{
+    "items": [
+        {
+            "documentId": 495,
+            "documentUniqueId": "72562f17-730f-487a-95d7-b903bf37ba11",
+            "documentName": "Example Document.pdf",
+            "primaryGroupUniqueId": "3de0747b-1984-4df2-93df-d6c0039325d6",
+            "primaryGroupName": "Group Name",
+            "archivedDate": "2025-11-18T14:42:55.27",
+            "archivedByUserName": "User Name",
+            "uploadDate": "2024-04-17T12:47:03.057",
+            "userName": "Uploader Name",
+            "isArchived": true,
+            "isLinkedFile": false,
+            "canRestore": true,
+            "canDelete": true
+        }
+    ],
+    "totalItemCount": 67
+}
+```
+
+**Important Notes:**
+- This is a paginated response - loop through pages until `items.Count < PageSize`
+- The `documentId` (numeric) is used for deletion, not `documentUniqueId`
+
+---
+
+### Bulk Delete Archived Documents
+
+**Endpoint:** `/bff/document/api/v1/documents/bulk`
+
+**Method:** DELETE
+
+**Required Headers:**
+```
+Authorization: Bearer {token}
+Content-Type: application/json
+Accept: application/json
+X-Requested-With: XMLHttpRequest
+```
+
+**Body Structure:**
+```json
+{
+    "documentIds": [32, 495, 561]
+}
+```
+
+**Usage:**
+```powershell
+$deleteUrl = "$SiteURL/bff/document/api/v1/documents/bulk"
+$deleteBody = @{
+    documentIds = @(32, 495, 561)  # Array of numeric document IDs
+}
+
+$headers = @{
+    "Authorization" = "Bearer $Token"
+    "Content-Type" = "application/json"
+    "Accept" = "application/json"
+    "X-Requested-With" = "XMLHttpRequest"
+}
+
+$jsonBody = $deleteBody | ConvertTo-Json -Depth 10
+$response = Invoke-RestMethod -Uri $deleteUrl -Method Delete -Headers $headers -Body $jsonBody
+```
+
+**Important Notes:**
+- Use the numeric `documentId` from the list response, NOT `documentUniqueId`
+- Can delete multiple documents in a single request
+- Recommended to batch delete in groups of 50 for large operations
+- This permanently deletes the documents - cannot be undone
+
+---
+
 ## Questions?
 
 If you encounter an API-related issue:
@@ -695,3 +792,4 @@ If you encounter an API-related issue:
 2. Verify the request body structure matches the examples above
 3. Check the -Depth parameter on ConvertTo-Json (should be 20)
 4. Review the debug logs from Invoke-ApiPut/Post/Get functions
+5. For document deletion, ensure you're using numeric `documentId`, not `documentUniqueId`
