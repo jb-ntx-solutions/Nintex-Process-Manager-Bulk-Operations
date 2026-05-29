@@ -21,17 +21,22 @@ You only need this script plus a `config.txt` and a CSV.
 
 | Column      | Accepted names                                         | Meaning                                  |
 |-------------|--------------------------------------------------------|------------------------------------------|
-| Process ID  | `ProcessID`, `ProcessId`, `Process ID`, `ProcessUniqueId`, `Id`, `ID` | The process to update (numeric Id or GUID) |
+| Process ID  | `ProcessID`, `ProcessId`, `Process ID`, `ProcessUniqueId`, `Id`, `ID` | The process **UniqueId (GUID)** to update |
 | New owner   | `NewOwner`, `Owner`, `OwnerUsername`, `ProcessOwner`   | Username of the new owner                |
 | New expert  | `NewExpert`, `Expert`, `ExpertUsername`, `ProcessExpert` | Username of the new expert             |
 
+> **Process ID must be the process `UniqueId` (GUID)** — the value in a process
+> URL (`.../Process/View/{guid}`), not the short numeric Id. The
+> `/Api/v1/Processes/{id}` endpoint addresses processes by their GUID. The
+> script warns if it sees non-GUID values.
+
 ```csv
 ProcessID,NewOwner,NewExpert
-1234,jonathan@palouse.io,jane@palouse.io
-1235,,jane@palouse.io
-1236,jonathan@palouse.io,
-1237,unassigned,jane@palouse.io
-1238,jonathan@palouse.io,N/A
+9b55b171-4e9e-4a4a-acc3-093327047153,jonathan@palouse.io,jane@palouse.io
+b8631d0f-b7f8-44bb-80ed-f89886551c42,,jane@palouse.io
+f5698de9-1956-4095-9d6f-edaf6e28f022,jonathan@palouse.io,
+a1b2c3d4-e5f6-7890-abcd-ef1234567890,unassigned,jane@palouse.io
+c2a29d7b-1b61-4784-9524-7b5583db084c,jonathan@palouse.io,N/A
 ```
 
 Per-cell rules:
