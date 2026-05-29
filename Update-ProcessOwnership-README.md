@@ -123,11 +123,14 @@ Provide the CSV up front:
 
 ## Parameters
 
-| Parameter     | Description                                             |
-|---------------|---------------------------------------------------------|
-| `-ConfigPath` | Path to the config file. Default: `config.txt`.        |
-| `-CsvPath`    | Path to the CSV. Prompted if omitted.                  |
-| `-WhatIf`     | Preview only — make no changes.                        |
+| Parameter        | Description                                             |
+|------------------|---------------------------------------------------------|
+| `-ConfigPath`    | Path to the config file. Default: `config.txt`.        |
+| `-CsvPath`       | Path to the CSV. Prompted if omitted.                  |
+| `-WhatIf`        | Preview only — make no changes.                        |
+| `-DelaySeconds`  | Seconds to wait between processes that contact the server. Default: `1`. Increase if you still see intermittent `500` errors; set to `0` to disable. |
+| `-MaxRetries`    | Times to retry a request that fails with a transient error (HTTP 5xx or a network error), using exponential backoff (2s, 4s, 8s, …). Default: `3`; set to `0` to disable retries. |
+| `-NoPause`       | Skip the "Press Enter to close" prompt at the end.     |
 
 ## Output
 
