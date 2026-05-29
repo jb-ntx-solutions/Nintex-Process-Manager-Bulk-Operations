@@ -249,6 +249,13 @@ function Get-IdFromCsvRow {
     return Get-RowValue -Row $Row -ColumnNames @('ProcessID', 'ProcessId', 'Process ID', 'ProcessUniqueId', 'Id', 'ID')
 }
 
+# The /Api/v1/Processes/{id} endpoint expects the process UniqueId (a GUID),
+# not the numeric internal Id. This is used to warn about likely-wrong values.
+function Test-IsGuid {
+    param([string]$Value)
+    return $Value -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+}
+
 function Get-NewOwnerFromCsvRow {
     param($Row)
     return Get-RowValue -Row $Row -ColumnNames @('NewOwner', 'Owner', 'OwnerUsername', 'ProcessOwner')
@@ -394,6 +401,15 @@ $csv = Read-CsvWithFlexibleHeaders -Path $CsvPath
 if (-not $csv) { return }
 Write-Host "Loaded $($csv.Count) row(s) from '$CsvPath'" -ForegroundColor Green
 Write-Host "Blank owner/expert cells leave that role unchanged. Keywords ($($script:UnassignKeywords -join ', ')) set the placeholder user." -ForegroundColor Gray
+
+# The Processes API path expects the process UniqueId (GUID). Warn if values look
+# like numeric internal Ids, which the endpoint will not resolve.
+$nonGuidIds = @($csv | ForEach-Object { Get-IdFromCsvRow -Row $_ } | Where-Object { $_ -and -not (Test-IsGuid -Value $_) })
+if ($nonGuidIds.Count -gt 0) {
+    Write-Host "`nNote: $($nonGuidIds.Count) ProcessID value(s) are not GUIDs (e.g. '$($nonGuidIds[0])')." -ForegroundColor Yellow
+    Write-Host "This script addresses processes by their UniqueId (GUID), as found in a process URL (.../Process/View/{guid})." -ForegroundColor Yellow
+    Write-Host "Numeric internal Ids will likely fail to resolve." -ForegroundColor Yellow
+}
 
 # --- Pre-flight: resolve every distinct username via SCIM ---
 Write-Host "`nResolving users via SCIM ($scimBaseUrl)..." -ForegroundColor Cyan
