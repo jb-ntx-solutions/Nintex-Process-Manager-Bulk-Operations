@@ -1,23 +1,48 @@
 # Update Process Ownership (Standalone)
 
 `Update-ProcessOwnership.ps1` is a self-contained PowerShell script for bulk
-updating the **Owner** and/or **Expert** on a list of Nintex Process Manager
-(Promapp) processes. It was extracted from "Mode 4" of the larger
-`Nintex-BulkOperations.ps1` tool so it can be shared on its own.
+updating the **Owner** and/or **Expert** on Nintex Process Manager (Promapp)
+processes, one process per CSV row. It was extracted from "Mode 4" of the
+larger `Nintex-BulkOperations.ps1` tool so it can be shared on its own.
 
 It is fully standalone — it has no dependency on `Nintex-BulkOperations.ps1`.
-You only need this script plus a `config.txt`.
+You only need this script plus a `config.txt` and a CSV.
 
 ## What it does
 
-1. Reads a list of Process IDs from a file you provide.
-2. Asks for (or accepts as parameters) the new **Owner** and/or **Expert**,
-   identified by username.
-3. Resolves each username to a numeric **user Id** and display **name** via the
-   **SCIM API**.
-4. For each process: fetches the process definition, sets `OwnerId`/`Owner`
-   and/or `ExpertId`/`Expert` in the definition, and saves the process.
-5. Writes a timestamped results CSV.
+1. Reads a CSV with one row per process (`ProcessID`, `NewOwner`, `NewExpert`).
+2. Resolves each distinct username to a numeric **user Id** and display **name**
+   via the **SCIM API** (looked up once and cached).
+3. For each row: fetches the process definition, sets `OwnerId`/`Owner` and/or
+   `ExpertId`/`Expert` in the definition, and saves the process.
+4. Writes a timestamped results CSV.
+
+## CSV format
+
+| Column      | Accepted names                                         | Meaning                                  |
+|-------------|--------------------------------------------------------|------------------------------------------|
+| Process ID  | `ProcessID`, `ProcessId`, `Process ID`, `ProcessUniqueId`, `Id`, `ID` | The process to update (numeric Id or GUID) |
+| New owner   | `NewOwner`, `Owner`, `OwnerUsername`, `ProcessOwner`   | Username of the new owner                |
+| New expert  | `NewExpert`, `Expert`, `ExpertUsername`, `ProcessExpert` | Username of the new expert             |
+
+```csv
+ProcessID,NewOwner,NewExpert
+1234,jonathan@palouse.io,jane@palouse.io
+1235,,jane@palouse.io
+1236,jonathan@palouse.io,
+1237,unassigned,jane@palouse.io
+1238,jonathan@palouse.io,N/A
+```
+
+Per-cell rules:
+
+- **Blank cell** → leave that role **unchanged**.
+- **A username** (e.g. `jonathan@palouse.io`) → resolved via SCIM and set.
+- **An unassign keyword** (`unassigned`, `unassign`, `none`, `n/a`, `na`,
+  case-insensitive) → set the role to the built-in **"Needs to be reassigned
+  N/A"** placeholder (user Id `2`).
+
+See `Examples/update-ownership-example.csv`.
 
 ## Why SCIM?
 
@@ -68,79 +93,36 @@ ScimBaseUrl=https://api.promapp.com/api/scim
 > **Never commit `config.txt` to version control.** It is already covered by
 > `.gitignore` in this repository.
 
-## Process ID file
-
-Provide a file containing the processes to update. Two formats are accepted:
-
-**Plain text** (one ID per line; `#` comments and blank lines ignored):
-
-```
-# see Examples/process-ids-example.txt
-1234
-1235
-1236
-```
-
-**CSV** with a recognized ID column (`ProcessID`, `ProcessId`, `Process ID`,
-`ProcessUniqueId`, `Id`, or `ID`):
-
-```csv
-ProcessID
-1234
-1235
-```
-
-IDs may be numeric process IDs or process `UniqueId` GUIDs.
-
 ## Usage
 
-Run interactively (prompts for the file, owner, and expert):
+Run interactively (prompts for the CSV path):
 
 ```powershell
 .\Update-ProcessOwnership.ps1
 ```
 
-Provide everything up front:
+Provide the CSV up front:
 
 ```powershell
-.\Update-ProcessOwnership.ps1 -ProcessIdFile .\process-ids.txt -NewOwner jonathan@palouse.io -NewExpert jane@palouse.io
-```
-
-Update only the owner (leave expert unchanged):
-
-```powershell
-.\Update-ProcessOwnership.ps1 -ProcessIdFile .\process-ids.txt -NewOwner jonathan@palouse.io
-```
-
-### Clearing a role (unassigning)
-
-Nintex uses a built-in placeholder user, **"Needs to be reassigned N/A"**
-(user Id `2`), when a role has no real assignee. To set the owner or expert to
-that placeholder, pass any of these keywords (case-insensitive):
-`unassigned`, `unassign`, `none`, `n/a`, `na`.
-
-```powershell
-.\Update-ProcessOwnership.ps1 -ProcessIdFile .\process-ids.txt -NewOwner unassigned
+.\Update-ProcessOwnership.ps1 -CsvPath .\update-ownership.csv
 ```
 
 ### Preview before changing anything (recommended)
 
-`-WhatIf` shows exactly what would change for each process — current owner/expert
+`-WhatIf` shows exactly what would change for each row — current owner/expert
 (name + id) → new — without saving:
 
 ```powershell
-.\Update-ProcessOwnership.ps1 -ProcessIdFile .\process-ids.txt -NewOwner jonathan@palouse.io -WhatIf
+.\Update-ProcessOwnership.ps1 -CsvPath .\update-ownership.csv -WhatIf
 ```
 
 ## Parameters
 
-| Parameter        | Description                                                                 |
-|------------------|-----------------------------------------------------------------------------|
-| `-ConfigPath`    | Path to the config file. Default: `config.txt`.                             |
-| `-ProcessIdFile` | Path to the file of Process IDs. Prompted if omitted.                       |
-| `-NewOwner`      | Username (or numeric user Id) of the new owner, or an unassign keyword. Prompted if both roles omitted. |
-| `-NewExpert`     | Username (or numeric user Id) of the new expert, or an unassign keyword. Prompted if both roles omitted. |
-| `-WhatIf`        | Preview only — make no changes.                                             |
+| Parameter     | Description                                             |
+|---------------|---------------------------------------------------------|
+| `-ConfigPath` | Path to the config file. Default: `config.txt`.        |
+| `-CsvPath`    | Path to the CSV. Prompted if omitted.                  |
+| `-WhatIf`     | Preview only — make no changes.                        |
 
 ## Output
 
@@ -149,15 +131,16 @@ A timestamped CSV is written to the current directory:
 - `UpdateOwnership_Results_YYYYMMDD_HHMMSS.csv` (live run)
 - `UpdateOwnership_Preview_YYYYMMDD_HHMMSS.csv` (`-WhatIf` run)
 
-Columns: `ProcessID`, `ProcessName`, `Status` (Success / Failed / Preview),
-`Message`, `ActionUrl`.
+Columns: `ProcessID`, `ProcessName`, `Status` (Success / Failed / Skipped /
+Preview), `Message`, `ActionUrl`.
 
 ## Notes
 
-- The same new owner/expert is applied to **every** process in the list. To set
-  different values per process, run the script once per group of processes.
-- If a username cannot be resolved via SCIM, the script aborts before making
-  any changes (an owner/expert cannot be set without a valid numeric user Id).
+- Each distinct username is resolved via SCIM **once** before processing and
+  cached, so a large CSV with repeated owners/experts makes minimal SCIM calls.
+- If a username cannot be resolved via SCIM, you are warned up front. Rows that
+  reference an unresolved username are **skipped** (that role cannot be set
+  without a valid numeric user Id); other rows still process.
 - The save sends the full process definition back to the API
   (`ProcessJson` as an escaped string, per `API_ARCHITECTURE.md`). It updates
   the process's working revision; if your tenant requires a separate publish

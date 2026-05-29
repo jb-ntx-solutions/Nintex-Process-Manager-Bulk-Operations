@@ -1,5 +1,0 @@
-# One Process ID per line. Lines starting with '#' and blank lines are ignored.
-# IDs may be numeric process IDs or process UniqueId GUIDs.
-1234
-1235
-1236
