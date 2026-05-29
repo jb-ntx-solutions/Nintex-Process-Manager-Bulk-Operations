@@ -5,59 +5,57 @@
 #   Apply a single new Owner and/or Expert to a list of processes.
 #   The user supplies:
 #     1. A file containing the Process IDs to update (one per line, or a ProcessID column).
-#     2. The username (or non-GUID user ID) of the new Owner and/or new Expert.
-#   For each process the script fetches the process definition, updates the
-#   owner/expert in the definition, and saves the process.
+#     2. The username of the new Owner and/or new Expert.
+#   For each process the script:
+#     - Resolves the username to a numeric user Id and display name via the SCIM API
+#     - Fetches the process definition
+#     - Sets OwnerId/Owner and/or ExpertId/Expert in the definition
+#     - Saves the process
+#
+# Authentication:
+#   - Process read/save uses an OAuth token from {SiteURL}/oauth2/token (Username/Password in config).
+#   - User lookups use the SCIM API, which requires a separate API key (ScimApiKey in config).
 #
 # Usage:
-#   .\Update-ProcessOwnership.ps1 -ProcessIdFile .\process-ids.txt -NewOwner john.doe -NewExpert jane.smith
-#   .\Update-ProcessOwnership.ps1 -ProcessIdFile .\process-ids.txt -NewOwner john.doe -WhatIf
-#   .\Update-ProcessOwnership.ps1 -ProcessIdFile .\process-ids.txt -Discover
+#   .\Update-ProcessOwnership.ps1 -ProcessIdFile .\process-ids.txt -NewOwner jonathan@palouse.io -NewExpert jane@palouse.io
+#   .\Update-ProcessOwnership.ps1 -ProcessIdFile .\process-ids.txt -NewOwner jonathan@palouse.io -WhatIf
 #
-#   Any parameter you omit will be prompted for interactively (except -WhatIf / -Discover).
+#   Any parameter you omit will be prompted for interactively (except -WhatIf).
 #
 #Requires -Version 5.1
 
 [CmdletBinding()]
 param(
-    # Path to the configuration file (SiteURL / Username / Password).
+    # Path to the configuration file (SiteURL / Username / Password / ScimApiKey).
     [string]$ConfigPath = "config.txt",
 
     # Path to a file containing the Process IDs to update.
     # Accepts a plain text file (one ID per line) or a CSV with a ProcessID column.
     [string]$ProcessIdFile,
 
-    # Username or non-GUID user ID of the new Owner. Leave blank to skip owner updates.
+    # Username (or numeric user Id) of the new Owner. Leave blank to skip owner updates.
+    # Use one of the "unassign" keywords (see below) to set the owner to "Needs to be reassigned".
     [string]$NewOwner,
 
-    # Username or non-GUID user ID of the new Expert. Leave blank to skip expert updates.
+    # Username (or numeric user Id) of the new Expert. Leave blank to skip expert updates.
+    # Use one of the "unassign" keywords (see below) to set the expert to "Needs to be reassigned".
     [string]$NewExpert,
 
     # Preview mode: show what would change for each process without saving anything.
-    [switch]$WhatIf,
-
-    # Discovery mode: fetch the first process and print every owner/expert-related field
-    # found in its definition. Use this to confirm the field names for your tenant.
-    [switch]$Discover
+    [switch]$WhatIf
 )
 
 # ============================================================================
-# CONFIGURATION: Owner / Expert field detection
-# ----------------------------------------------------------------------------
-# The Nintex Process Manager process definition (processJson) stores the owner
-# and expert under tenant/version-specific property names. The script looks for
-# the FIRST property below that exists on the definition. If your tenant uses a
-# different name, run the script with -Discover to list the actual fields, then
-# add the correct name to the appropriate list.
+# CONSTANTS
 # ============================================================================
-$script:OwnerFieldCandidates = @(
-    'Owner', 'ProcessOwner', 'OwnerUserName', 'OwnerUsername',
-    'ProcessOwnerUserName', 'ProcessOwnerUsername', 'OwnerUser', 'ProcessOwnerUser'
-)
-$script:ExpertFieldCandidates = @(
-    'Expert', 'ProcessExpert', 'ExpertUserName', 'ExpertUsername',
-    'ProcessExpertUserName', 'ProcessExpertUsername', 'ExpertUser', 'ProcessExpertUser'
-)
+
+# The built-in placeholder user used when a process has no assigned owner/expert.
+# This user always has Id = 2 in Nintex Process Manager.
+$script:UnassignedUserId   = 2
+$script:UnassignedUserName = "Needs to be reassigned N/A"
+
+# Input keywords (case-insensitive) that mean "set this role to the unassigned placeholder".
+$script:UnassignKeywords = @('unassigned', 'unassign', 'none', 'n/a', 'na')
 
 # ============================================================================
 # CONFIGURATION AND AUTHENTICATION
@@ -89,7 +87,20 @@ function Read-ConfigFile {
         return $null
     }
 
+    if (-not $config.ScimApiKey) {
+        Write-Host "Configuration file is missing required field: ScimApiKey" -ForegroundColor Red
+        Write-Host "This script resolves usernames via the SCIM API, which needs its own API key." -ForegroundColor Yellow
+        return $null
+    }
+
     $config.SiteURL = $config.SiteURL.TrimEnd('/')
+
+    # SCIM base URL is a global Nintex endpoint (not the tenant site). Allow override via config.
+    if (-not $config.ScimBaseUrl) {
+        $config.ScimBaseUrl = "https://api.promapp.com/api/scim"
+    }
+    $config.ScimBaseUrl = $config.ScimBaseUrl.TrimEnd('/')
+
     return $config
 }
 
@@ -195,72 +206,102 @@ function Invoke-ApiPut {
 }
 
 # ============================================================================
-# USER SEARCH / RESOLUTION
+# USER RESOLUTION (SCIM API)
 # ============================================================================
 
-function Search-User {
+# Looks up a user via the SCIM API by userName (or by numeric id if a number is given).
+# Returns an object with Id (numeric), Name (display name), and UserName, or $null.
+function Get-ScimUser {
     param(
-        [string]$SiteURL,
-        [string]$Token,
+        [string]$ScimBaseUrl,
+        [string]$ScimApiKey,
         [string]$SearchTerm
     )
 
     try {
-        $url = "$SiteURL/user/autocomplete.aspx?includeEmail=true&term=$SearchTerm"
-        $headers = @{ "Authorization" = "Bearer $Token" }
-        $response = Invoke-RestMethod -Uri $url -Method Get -Headers $headers
-        return $response
+        # A purely numeric term is treated as a user Id; anything else as a userName.
+        if ($SearchTerm -match '^\d+$') {
+            $filter = "id eq `"$SearchTerm`""
+        } else {
+            $filter = "userName eq `"$SearchTerm`""
+        }
+
+        $url = "$ScimBaseUrl/users?filter=" + [uri]::EscapeDataString($filter)
+        $headers = @{
+            "Authorization" = "Bearer $ScimApiKey"
+            "Accept"        = "application/json"
+        }
+
+        $resp = Invoke-RestMethod -Uri $url -Method Get -Headers $headers -ErrorAction Stop
+
+        if (-not $resp -or [int]$resp.totalResults -lt 1) {
+            return $null
+        }
+
+        $r = @($resp.Resources)[0]
+        if (-not $r) { return $null }
+
+        # Build the display name the same way the UI does: prefer an explicit display name,
+        # then SCIM's formatted name, then "givenName familyName", then the userName.
+        $name = $null
+        if ($r.displayName) {
+            $name = $r.displayName
+        } elseif ($r.name -and $r.name.formatted) {
+            $name = $r.name.formatted
+        } elseif ($r.name) {
+            $name = ("{0} {1}" -f $r.name.givenName, $r.name.familyName).Trim()
+        }
+        if (-not $name) { $name = $r.userName }
+
+        return [PSCustomObject]@{
+            Id       = $r.id
+            Name     = $name
+            UserName = $r.userName
+        }
     }
     catch {
-        Write-Host "User search error: $($_.Exception.Message)" -ForegroundColor Red
-        return @()
+        Write-Host "  SCIM lookup error for '$SearchTerm': $($_.Exception.Message)" -ForegroundColor Red
+        if ($_.Exception.Response) {
+            try {
+                $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+                $b = $reader.ReadToEnd(); $reader.Close()
+                if ($b) { Write-Host "    Response body: $b" -ForegroundColor Gray }
+            } catch { }
+        }
+        return $null
     }
 }
 
-# Resolves a username / user ID typed by the operator to a concrete user.
-# Returns an object with Username (the value sent to the API) and DisplayName,
-# or $null if no user could be resolved.
+# Resolves an operator-supplied owner/expert value to a concrete user.
+# Handles the "unassign" keywords and SCIM lookups. Returns an object with
+# Id / Name / UserName, or $null if it could not be resolved.
 function Resolve-User {
     param(
-        [string]$SiteURL,
-        [string]$Token,
+        [string]$ScimBaseUrl,
+        [string]$ScimApiKey,
         [string]$SearchTerm,
         [string]$RoleLabel = "user"
     )
 
     if (-not $SearchTerm) { return $null }
 
-    $users = Search-User -SiteURL $SiteURL -Token $Token -SearchTerm $SearchTerm
-    if (-not $users -or $users.Count -eq 0) {
-        Write-Host "  [X] No $RoleLabel found matching '$SearchTerm'" -ForegroundColor Red
+    if ($script:UnassignKeywords -contains $SearchTerm.ToLower()) {
+        Write-Host "  [OK] $RoleLabel set to placeholder: $script:UnassignedUserName (id $script:UnassignedUserId)" -ForegroundColor Green
+        return [PSCustomObject]@{
+            Id       = $script:UnassignedUserId
+            Name     = $script:UnassignedUserName
+            UserName = "(unassigned)"
+        }
+    }
+
+    $user = Get-ScimUser -ScimBaseUrl $ScimBaseUrl -ScimApiKey $ScimApiKey -SearchTerm $SearchTerm
+    if (-not $user) {
+        Write-Host "  [X] $RoleLabel '$SearchTerm' not found via SCIM" -ForegroundColor Red
         return $null
     }
 
-    # Prefer an exact match on the value (username/user ID) or on the label.
-    $exact = $users | Where-Object { $_.value -eq $SearchTerm -or $_.label -eq $SearchTerm } | Select-Object -First 1
-    if ($exact) {
-        Write-Host "  [OK] $RoleLabel '$SearchTerm' resolved to: $($exact.label)" -ForegroundColor Green
-        return [PSCustomObject]@{ Username = $exact.value; DisplayName = $exact.label }
-    }
-
-    # A single result is unambiguous - use it.
-    if (@($users).Count -eq 1) {
-        Write-Host "  [OK] $RoleLabel '$SearchTerm' resolved to: $($users[0].label)" -ForegroundColor Green
-        return [PSCustomObject]@{ Username = $users[0].value; DisplayName = $users[0].label }
-    }
-
-    # Multiple matches - let the operator pick.
-    Write-Host "`n  Multiple matches for $RoleLabel '$SearchTerm':" -ForegroundColor Yellow
-    for ($i = 0; $i -lt $users.Count; $i++) {
-        Write-Host "    [$i] $($users[$i].label)" -ForegroundColor White
-    }
-    $selection = Read-Host "  Select the correct $RoleLabel (number, or press Enter to cancel)"
-    if ($selection -match '^\d+$' -and [int]$selection -lt $users.Count) {
-        $picked = $users[[int]$selection]
-        return [PSCustomObject]@{ Username = $picked.value; DisplayName = $picked.label }
-    }
-
-    return $null
+    Write-Host "  [OK] $RoleLabel '$SearchTerm' resolved to: $($user.Name) (id $($user.Id))" -ForegroundColor Green
+    return $user
 }
 
 # ============================================================================
@@ -318,113 +359,29 @@ function Read-ProcessIdFile {
 }
 
 # ============================================================================
-# DEFINITION FIELD HELPERS
+# DEFINITION HELPERS
 # ============================================================================
 
-# Returns the name of the first candidate property that exists on the definition.
-function Find-DefinitionField {
+# Sets a property on the process definition, adding it if it does not yet exist.
+function Set-DefinitionProperty {
     param(
         $ProcessObj,
-        [string[]]$Candidates
+        [string]$Name,
+        $Value
     )
-
-    if (-not $ProcessObj -or -not $ProcessObj.PSObject) { return $null }
-    $names = $ProcessObj.PSObject.Properties.Name
-    foreach ($candidate in $Candidates) {
-        if ($names -contains $candidate) { return $candidate }
-    }
-    return $null
+    $ProcessObj | Add-Member -NotePropertyName $Name -NotePropertyValue $Value -Force
 }
 
-# Returns a printable representation of the current value of a definition field.
-function Get-FieldValueDisplay {
+# Returns a printable value for an existing definition property.
+function Get-DefinitionValue {
     param(
         $ProcessObj,
-        [string]$FieldName
+        [string]$Name
     )
-
-    if (-not $FieldName) { return "(field not found)" }
-    $val = $ProcessObj.$FieldName
-    if ($null -eq $val) { return "(empty)" }
-    if ($val -is [string]) { return $val }
-    return ($val | ConvertTo-Json -Depth 5 -Compress)
-}
-
-# Applies a resolved user to a definition field, handling both string-valued
-# and object-valued fields. Returns $true if a change was applied.
-function Set-DefinitionUser {
-    param(
-        $ProcessObj,
-        [string]$FieldName,
-        $User   # object with Username / DisplayName
-    )
-
-    if (-not $FieldName) { return $false }
-    $current = $ProcessObj.$FieldName
-
-    if ($null -eq $current -or $current -is [string] -or $current -is [ValueType]) {
-        $ProcessObj.$FieldName = $User.Username
-        return $true
-    }
-
-    # Object-valued field - update the recognizable sub-properties in place.
-    $changed = $false
-    if ($current.PSObject) {
-        $subNames = $current.PSObject.Properties.Name
-        foreach ($sub in @('UserName', 'Username', 'Value', 'Login', 'Email', 'Id', 'UserId')) {
-            if ($subNames -contains $sub) { $current.$sub = $User.Username; $changed = $true }
-        }
-        foreach ($sub in @('Name', 'DisplayName', 'Label', 'FullName')) {
-            if ($subNames -contains $sub -and $User.DisplayName) { $current.$sub = $User.DisplayName; $changed = $true }
-        }
-    }
-
-    if (-not $changed) {
-        # Unknown object shape - replace wholesale with the username.
-        $ProcessObj.$FieldName = $User.Username
-        $changed = $true
-    }
-
-    return $changed
-}
-
-# Recursively collects every property whose name mentions owner/expert. Used by -Discover.
-function Get-OwnerExpertProperties {
-    param(
-        $Obj,
-        [string]$Path = ""
-    )
-
-    $results = @()
-    if ($null -eq $Obj) { return $results }
-
-    if ($Obj -is [System.Collections.IEnumerable] -and -not ($Obj -is [string])) {
-        $i = 0
-        foreach ($item in $Obj) {
-            $results += Get-OwnerExpertProperties -Obj $item -Path "$Path[$i]"
-            $i++
-            if ($i -ge 3) { break }   # cap array traversal to limit noise
-        }
-        return $results
-    }
-
-    if ($Obj.PSObject -and $Obj.PSObject.Properties) {
-        foreach ($p in $Obj.PSObject.Properties) {
-            $childPath = if ($Path) { "$Path.$($p.Name)" } else { $p.Name }
-            if ($p.Name -match '(?i)owner|expert') {
-                $typeName = if ($null -ne $p.Value) { $p.Value.GetType().Name } else { 'null' }
-                $valueStr = if ($null -eq $p.Value) { "(empty)" }
-                            elseif ($p.Value -is [string]) { $p.Value }
-                            else { ($p.Value | ConvertTo-Json -Depth 5 -Compress) }
-                $results += [PSCustomObject]@{ Path = $childPath; Type = $typeName; Value = $valueStr }
-            }
-            if ($p.Value -and -not ($p.Value -is [string]) -and -not ($p.Value -is [ValueType])) {
-                $results += Get-OwnerExpertProperties -Obj $p.Value -Path $childPath
-            }
-        }
-    }
-
-    return $results
+    if (-not ($ProcessObj.PSObject.Properties.Name -contains $Name)) { return "(none)" }
+    $v = $ProcessObj.$Name
+    if ($null -eq $v -or "$v" -eq "") { return "(none)" }
+    return "$v"
 }
 
 # ============================================================================
@@ -441,7 +398,9 @@ if (-not $config) { return }
 
 $token = Get-AuthToken -SiteURL $config.SiteURL -Username $config.Username -Password $config.Password
 if (-not $token) { return }
-$siteUrl = $config.SiteURL
+$siteUrl     = $config.SiteURL
+$scimBaseUrl = $config.ScimBaseUrl
+$scimApiKey  = $config.ScimApiKey
 
 # --- Gather the process ID file ---
 if (-not $ProcessIdFile) {
@@ -454,32 +413,11 @@ if (-not $processIds -or $processIds.Count -eq 0) {
 }
 Write-Host "Loaded $($processIds.Count) Process ID(s) from '$ProcessIdFile'" -ForegroundColor Green
 
-# --- Discovery mode: inspect the first process and exit ---
-if ($Discover) {
-    $firstId = $processIds[0]
-    Write-Host "`n[DISCOVER] Inspecting owner/expert fields on process '$firstId'..." -ForegroundColor Yellow
-    $resp = Invoke-ApiGet -Url "$siteUrl/Api/v1/Processes/$firstId" -Token $token
-    if (-not $resp -or -not $resp.processJson) {
-        Write-Host "Could not retrieve the process definition for '$firstId'." -ForegroundColor Red
-        return
-    }
-    $found = @(Get-OwnerExpertProperties -Obj $resp.processJson)
-    if ($found.Count -eq 0) {
-        Write-Host "No properties containing 'owner' or 'expert' were found in the definition." -ForegroundColor Yellow
-        Write-Host "The owner/expert may be stored under a different name or via a separate endpoint." -ForegroundColor Yellow
-    } else {
-        Write-Host "`nOwner/Expert-related fields found in the process definition:" -ForegroundColor Cyan
-        $found | Format-Table -AutoSize | Out-Host
-        Write-Host "If the correct field is not in the candidate lists at the top of this script," -ForegroundColor Gray
-        Write-Host "add its name to `$OwnerFieldCandidates / `$ExpertFieldCandidates and re-run." -ForegroundColor Gray
-    }
-    return
-}
-
-# --- Gather and validate the new owner / expert ---
+# --- Gather the new owner / expert ---
 if (-not $PSBoundParameters.ContainsKey('NewOwner') -and -not $PSBoundParameters.ContainsKey('NewExpert')) {
-    $NewOwner  = Read-Host "`nNew Owner username or user ID (leave blank to skip)"
-    $NewExpert = Read-Host "New Expert username or user ID (leave blank to skip)"
+    Write-Host "`nTip: enter a username (e.g. jonathan@palouse.io), or 'unassigned' to clear the role." -ForegroundColor Gray
+    $NewOwner  = Read-Host "New Owner username (leave blank to skip)"
+    $NewExpert = Read-Host "New Expert username (leave blank to skip)"
 }
 
 if (-not $NewOwner -and -not $NewExpert) {
@@ -487,25 +425,24 @@ if (-not $NewOwner -and -not $NewExpert) {
     return
 }
 
-Write-Host "`nValidating users..." -ForegroundColor Cyan
-$resolvedOwner = $null
+# --- Resolve users via SCIM ---
+Write-Host "`nResolving users via SCIM ($scimBaseUrl)..." -ForegroundColor Cyan
+$resolvedOwner  = $null
 $resolvedExpert = $null
 
 if ($NewOwner) {
-    $resolvedOwner = Resolve-User -SiteURL $siteUrl -Token $token -SearchTerm $NewOwner -RoleLabel "owner"
+    $resolvedOwner = Resolve-User -ScimBaseUrl $scimBaseUrl -ScimApiKey $scimApiKey -SearchTerm $NewOwner -RoleLabel "owner"
     if (-not $resolvedOwner) {
-        $continue = Read-Host "Owner '$NewOwner' could not be resolved. Continue anyway? (Y/N)"
-        if ($continue -ne 'Y') { Write-Host "Operation cancelled" -ForegroundColor Yellow; return }
-        $resolvedOwner = [PSCustomObject]@{ Username = $NewOwner; DisplayName = $NewOwner }
+        Write-Host "Owner '$NewOwner' could not be resolved. Aborting (cannot set an owner without a valid user Id)." -ForegroundColor Red
+        return
     }
 }
 
 if ($NewExpert) {
-    $resolvedExpert = Resolve-User -SiteURL $siteUrl -Token $token -SearchTerm $NewExpert -RoleLabel "expert"
+    $resolvedExpert = Resolve-User -ScimBaseUrl $scimBaseUrl -ScimApiKey $scimApiKey -SearchTerm $NewExpert -RoleLabel "expert"
     if (-not $resolvedExpert) {
-        $continue = Read-Host "Expert '$NewExpert' could not be resolved. Continue anyway? (Y/N)"
-        if ($continue -ne 'Y') { Write-Host "Operation cancelled" -ForegroundColor Yellow; return }
-        $resolvedExpert = [PSCustomObject]@{ Username = $NewExpert; DisplayName = $NewExpert }
+        Write-Host "Expert '$NewExpert' could not be resolved. Aborting (cannot set an expert without a valid user Id)." -ForegroundColor Red
+        return
     }
 }
 
@@ -513,8 +450,8 @@ if ($NewExpert) {
 Write-Host "`n----------------------------------------" -ForegroundColor Cyan
 if ($WhatIf) { Write-Host "*** PREVIEW MODE: No changes will be made ***" -ForegroundColor Yellow }
 Write-Host "Processes to update : $($processIds.Count)" -ForegroundColor White
-if ($resolvedOwner)  { Write-Host "New Owner           : $($resolvedOwner.DisplayName) [$($resolvedOwner.Username)]" -ForegroundColor White }
-if ($resolvedExpert) { Write-Host "New Expert          : $($resolvedExpert.DisplayName) [$($resolvedExpert.Username)]" -ForegroundColor White }
+if ($resolvedOwner)  { Write-Host "New Owner           : $($resolvedOwner.Name) (id $($resolvedOwner.Id))" -ForegroundColor White }
+if ($resolvedExpert) { Write-Host "New Expert          : $($resolvedExpert.Name) (id $($resolvedExpert.Id))" -ForegroundColor White }
 Write-Host "----------------------------------------" -ForegroundColor Cyan
 
 if (-not $WhatIf) {
@@ -543,34 +480,13 @@ foreach ($processId in $processIds) {
     $processObj  = $resp.processJson
     $processName = if ($processObj.Name) { $processObj.Name } else { "Unknown" }
 
-    $ownerField  = if ($resolvedOwner)  { Find-DefinitionField -ProcessObj $processObj -Candidates $script:OwnerFieldCandidates }  else { $null }
-    $expertField = if ($resolvedExpert) { Find-DefinitionField -ProcessObj $processObj -Candidates $script:ExpertFieldCandidates } else { $null }
-
-    # Build a description of the intended change for reporting.
+    # Describe the intended change for reporting.
     $changes = @()
     if ($resolvedOwner) {
-        if ($ownerField) {
-            $changes += "Owner: $(Get-FieldValueDisplay -ProcessObj $processObj -FieldName $ownerField) -> $($resolvedOwner.Username) [field: $ownerField]"
-        } else {
-            $changes += "Owner: (no owner field found in definition)"
-        }
+        $changes += "Owner: $(Get-DefinitionValue -ProcessObj $processObj -Name 'Owner') (id $(Get-DefinitionValue -ProcessObj $processObj -Name 'OwnerId')) -> $($resolvedOwner.Name) (id $($resolvedOwner.Id))"
     }
     if ($resolvedExpert) {
-        if ($expertField) {
-            $changes += "Expert: $(Get-FieldValueDisplay -ProcessObj $processObj -FieldName $expertField) -> $($resolvedExpert.Username) [field: $expertField]"
-        } else {
-            $changes += "Expert: (no expert field found in definition)"
-        }
-    }
-
-    # If neither role could be mapped to a field, record and skip.
-    if (-not $ownerField -and -not $expertField) {
-        $results += [PSCustomObject]@{
-            ProcessID = $processId; ProcessName = $processName; Status = "Skipped"
-            Message = "No owner/expert field found in definition. Run with -Discover to identify the field name."
-            ActionUrl = "$siteUrl/Process/View/$processId"
-        }
-        continue
+        $changes += "Expert: $(Get-DefinitionValue -ProcessObj $processObj -Name 'Expert') (id $(Get-DefinitionValue -ProcessObj $processObj -Name 'ExpertId')) -> $($resolvedExpert.Name) (id $($resolvedExpert.Id))"
     }
 
     if ($WhatIf) {
@@ -582,9 +498,15 @@ foreach ($processId in $processIds) {
         continue
     }
 
-    # Apply the changes to the definition object.
-    if ($resolvedOwner -and $ownerField)  { [void](Set-DefinitionUser -ProcessObj $processObj -FieldName $ownerField  -User $resolvedOwner) }
-    if ($resolvedExpert -and $expertField) { [void](Set-DefinitionUser -ProcessObj $processObj -FieldName $expertField -User $resolvedExpert) }
+    # Apply the changes to the definition (both the numeric Id and the display name).
+    if ($resolvedOwner) {
+        Set-DefinitionProperty -ProcessObj $processObj -Name 'OwnerId' -Value ([int]$resolvedOwner.Id)
+        Set-DefinitionProperty -ProcessObj $processObj -Name 'Owner'   -Value $resolvedOwner.Name
+    }
+    if ($resolvedExpert) {
+        Set-DefinitionProperty -ProcessObj $processObj -Name 'ExpertId' -Value ([int]$resolvedExpert.Id)
+        Set-DefinitionProperty -ProcessObj $processObj -Name 'Expert'   -Value $resolvedExpert.Name
+    }
 
     # Save: ProcessJson must be sent as an escaped JSON STRING (per API_ARCHITECTURE.md).
     $processJsonString = $processObj | ConvertTo-Json -Depth 20 -Compress
@@ -629,13 +551,11 @@ if ($WhatIf) {
     Write-Host "Preview results saved to: $outputPath" -ForegroundColor Yellow
     Write-Host "Total checked   : $($results.Count)" -ForegroundColor Cyan
     Write-Host "Would update    : $(($results | Where-Object { $_.Status -eq 'Preview' }).Count)" -ForegroundColor Yellow
-    Write-Host "Skipped         : $(($results | Where-Object { $_.Status -eq 'Skipped' }).Count)" -ForegroundColor Gray
     Write-Host "Failed to check : $(($results | Where-Object { $_.Status -eq 'Failed' }).Count)" -ForegroundColor Red
     Write-Host "`n*** This was a PREVIEW - no changes were made ***" -ForegroundColor Yellow
 } else {
     Write-Host "Results saved to: $outputPath" -ForegroundColor Green
     Write-Host "Total operations: $($results.Count)" -ForegroundColor Cyan
     Write-Host "Successful      : $(($results | Where-Object { $_.Status -eq 'Success' }).Count)" -ForegroundColor Green
-    Write-Host "Skipped         : $(($results | Where-Object { $_.Status -eq 'Skipped' }).Count)" -ForegroundColor Gray
     Write-Host "Failed          : $(($results | Where-Object { $_.Status -eq 'Failed' }).Count)" -ForegroundColor Red
 }

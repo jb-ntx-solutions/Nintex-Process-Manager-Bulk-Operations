@@ -11,6 +11,15 @@ Username=your.email@company.com
 # Your password
 Password=YourPasswordHere
 
+# Required for Update-ProcessOwnership.ps1: SCIM API key (Bearer token)
+# Used to resolve usernames to numeric user IDs via the SCIM API.
+# Generate this in Nintex Process Manager under the SCIM / API integration settings.
+ScimApiKey=YourScimApiKeyHere
+
+# Optional: SCIM API base URL. Defaults to https://api.promapp.com/api/scim
+# Override only if your tenant uses a different regional SCIM host.
+ScimBaseUrl=https://api.promapp.com/api/scim
+
 # Optional: Default Process Group ID for restore operations
 # Leave blank to be prompted each time
 DefaultRestoreGroupID=
