@@ -45,6 +45,10 @@ param(
     # overwhelming it (which can cause intermittent 500 errors). Default: 1.
     [int]$DelaySeconds = 1,
 
+    # How many times to retry a request that fails with a transient error
+    # (HTTP 5xx or a network error), using exponential backoff. Default: 3.
+    [int]$MaxRetries = 3,
+
     # Skip the "Press Enter to close" prompt at the end (useful for unattended runs).
     [switch]$NoPause
 )
@@ -145,25 +149,55 @@ function Get-AuthToken {
 # API HELPER FUNCTIONS
 # ============================================================================
 
+# Extracts the numeric HTTP status code from a caught error, or $null if there
+# was no HTTP response (e.g. a connection/timeout error).
+function Get-ErrorStatusCode {
+    param($ErrorRecord)
+    if ($ErrorRecord.Exception.Response) {
+        try { return [int]$ErrorRecord.Exception.Response.StatusCode } catch { return $null }
+    }
+    return $null
+}
+
+# A request is worth retrying if it failed with a 5xx server error or a
+# network-level error (no HTTP response at all).
+function Test-TransientStatus {
+    param($StatusCode)
+    return ($null -eq $StatusCode) -or ($StatusCode -ge 500 -and $StatusCode -lt 600)
+}
+
 function Invoke-ApiGet {
     param(
         [string]$Url,
-        [string]$Token
+        [string]$Token,
+        [int]$MaxRetries = 0
     )
 
-    try {
-        $headers = @{
-            "Authorization"    = "Bearer $Token"
-            "Accept"           = "application/json"
-            "Content-Type"     = "application/json"
-            "X-Requested-With" = "XMLHttpRequest"
-        }
-
-        return Invoke-RestMethod -Uri $Url -Method Get -Headers $headers
+    $headers = @{
+        "Authorization"    = "Bearer $Token"
+        "Accept"           = "application/json"
+        "Content-Type"     = "application/json"
+        "X-Requested-With" = "XMLHttpRequest"
     }
-    catch {
-        Write-Host "API GET Error ($Url): $($_.Exception.Message)" -ForegroundColor Red
-        return $null
+
+    $attempt = 0
+    while ($true) {
+        $attempt++
+        try {
+            return Invoke-RestMethod -Uri $Url -Method Get -Headers $headers -ErrorAction Stop
+        }
+        catch {
+            $status = Get-ErrorStatusCode -ErrorRecord $_
+            if ((Test-TransientStatus -StatusCode $status) -and $attempt -le $MaxRetries) {
+                $wait = [int][math]::Pow(2, $attempt)   # 2s, 4s, 8s, ...
+                $label = if ($null -ne $status) { "HTTP $status" } else { "network error" }
+                Write-Host "`n  GET $label - retry $attempt/$MaxRetries in ${wait}s..." -ForegroundColor Yellow
+                Start-Sleep -Seconds $wait
+                continue
+            }
+            Write-Host "API GET Error ($Url): $($_.Exception.Message)" -ForegroundColor Red
+            return $null
+        }
     }
 }
 
@@ -171,41 +205,55 @@ function Invoke-ApiPut {
     param(
         [string]$Url,
         [string]$Token,
-        [object]$Body
+        [object]$Body,
+        [int]$MaxRetries = 0
     )
 
-    try {
-        $headers = @{
-            "Authorization"    = "Bearer $Token"
-            "Content-Type"     = "application/json"
-            "Accept"           = "application/json"
-            "X-Requested-With" = "XMLHttpRequest"
-        }
-
-        $jsonBody = $Body | ConvertTo-Json -Depth 20
-
-        $response = Invoke-RestMethod -Uri $Url -Method Put -Headers $headers -Body $jsonBody -ErrorAction Stop
-        return @{ Success = $true; StatusCode = 200; Response = $response }
+    $headers = @{
+        "Authorization"    = "Bearer $Token"
+        "Content-Type"     = "application/json"
+        "Accept"           = "application/json"
+        "X-Requested-With" = "XMLHttpRequest"
     }
-    catch {
-        $errorDetails = $_.Exception.Message
-        $statusCode = "Unknown"
 
-        if ($_.Exception.Response) {
-            $statusCode = [int]$_.Exception.Response.StatusCode
-            try {
-                $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
-                $responseBody = $reader.ReadToEnd()
-                $reader.Close()
-                if ($responseBody) {
-                    Write-Host "  Response body: $responseBody" -ForegroundColor Gray
-                }
-            }
-            catch { }
+    $jsonBody = $Body | ConvertTo-Json -Depth 20
+
+    $attempt = 0
+    while ($true) {
+        $attempt++
+        try {
+            $response = Invoke-RestMethod -Uri $Url -Method Put -Headers $headers -Body $jsonBody -ErrorAction Stop
+            return @{ Success = $true; StatusCode = 200; Response = $response }
         }
+        catch {
+            $status = Get-ErrorStatusCode -ErrorRecord $_
+            if ((Test-TransientStatus -StatusCode $status) -and $attempt -le $MaxRetries) {
+                $wait = [int][math]::Pow(2, $attempt)   # 2s, 4s, 8s, ...
+                $label = if ($null -ne $status) { "HTTP $status" } else { "network error" }
+                Write-Host "`n  PUT $label - retry $attempt/$MaxRetries in ${wait}s..." -ForegroundColor Yellow
+                Start-Sleep -Seconds $wait
+                continue
+            }
 
-        Write-Host "API PUT Error ($Url): HTTP $statusCode - $errorDetails" -ForegroundColor Red
-        return @{ Success = $false; StatusCode = $statusCode; Error = $errorDetails }
+            # Out of retries (or a non-transient error): report details and give up.
+            $errorDetails = $_.Exception.Message
+            $statusCode = if ($null -ne $status) { $status } else { "Unknown" }
+
+            if ($_.Exception.Response) {
+                try {
+                    $reader = New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())
+                    $responseBody = $reader.ReadToEnd()
+                    $reader.Close()
+                    if ($responseBody) {
+                        Write-Host "  Response body: $responseBody" -ForegroundColor Gray
+                    }
+                }
+                catch { }
+            }
+
+            Write-Host "API PUT Error ($Url): HTTP $statusCode - $errorDetails" -ForegroundColor Red
+            return @{ Success = $false; StatusCode = $statusCode; Error = $errorDetails }
+        }
     }
 }
 
@@ -545,7 +593,7 @@ foreach ($row in $csv) {
     }
     $serverCallMade = $true
 
-    $resp = Invoke-ApiGet -Url "$siteUrl/Api/v1/Processes/$processId" -Token $token
+    $resp = Invoke-ApiGet -Url "$siteUrl/Api/v1/Processes/$processId" -Token $token -MaxRetries $MaxRetries
     if (-not $resp -or -not $resp.processJson) {
         $results += [PSCustomObject]@{
             ProcessID = $processId; ProcessName = ""; Status = "Failed"
@@ -601,7 +649,7 @@ foreach ($row in $csv) {
         VariantConnectionChangeStates     = @()
     }
 
-    $updateResult = Invoke-ApiPut -Url "$siteUrl/Api/v1/Processes/$processId" -Token $token -Body $updateBody
+    $updateResult = Invoke-ApiPut -Url "$siteUrl/Api/v1/Processes/$processId" -Token $token -Body $updateBody -MaxRetries $MaxRetries
 
     if ($updateResult -and $updateResult.Success) {
         $results += [PSCustomObject]@{
