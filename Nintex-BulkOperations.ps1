@@ -1763,10 +1763,10 @@ function Invoke-BulkUpdateLocation {
 
         if ($group) {
             $validatedGroups[$groupId] = $group
-            Write-Host "  ✓ Group $groupId exists: $($group.name)" -ForegroundColor Green
+            Write-Host "  [OK] Group $groupId exists: $($group.name)" -ForegroundColor Green
         } else {
             $invalidGroups += $groupId
-            Write-Host "  ✗ Group $groupId not found" -ForegroundColor Red
+            Write-Host "  [X] Group $groupId not found" -ForegroundColor Red
         }
     }
 
@@ -1976,10 +1976,10 @@ function Invoke-BulkUpdateOwnership {
 
         if ($exactMatch) {
             $validatedUsers[$username] = $exactMatch
-            Write-Host "  ✓ User '$username' exists: $($exactMatch.label)" -ForegroundColor Green
+            Write-Host "  [OK] User '$username' exists: $($exactMatch.label)" -ForegroundColor Green
         } else {
             $invalidUsers += $username
-            Write-Host "  ✗ User '$username' not found" -ForegroundColor Red
+            Write-Host "  [X] User '$username' not found" -ForegroundColor Red
         }
     }
 
@@ -2044,8 +2044,8 @@ function Invoke-BulkUpdateOwnership {
                 $currentExpert = if ($process.expert) { $process.expert } else { "None" }
 
                 $changes = @()
-                if ($newOwner) { $changes += "Owner: $currentOwner → $newOwner" }
-                if ($newExpert) { $changes += "Expert: $currentExpert → $newExpert" }
+                if ($newOwner) { $changes += "Owner: $currentOwner -> $newOwner" }
+                if ($newExpert) { $changes += "Expert: $currentExpert -> $newExpert" }
 
                 if ($changes.Count -gt 0) {
                     $results += [PSCustomObject]@{
