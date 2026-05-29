@@ -123,11 +123,13 @@ Provide the CSV up front:
 
 ## Parameters
 
-| Parameter     | Description                                             |
-|---------------|---------------------------------------------------------|
-| `-ConfigPath` | Path to the config file. Default: `config.txt`.        |
-| `-CsvPath`    | Path to the CSV. Prompted if omitted.                  |
-| `-WhatIf`     | Preview only — make no changes.                        |
+| Parameter        | Description                                             |
+|------------------|---------------------------------------------------------|
+| `-ConfigPath`    | Path to the config file. Default: `config.txt`.        |
+| `-CsvPath`       | Path to the CSV. Prompted if omitted.                  |
+| `-WhatIf`        | Preview only — make no changes.                        |
+| `-DelaySeconds`  | Seconds to wait between processes that contact the server. Default: `1`. Increase if you still see intermittent `500` errors; set to `0` to disable. |
+| `-NoPause`       | Skip the "Press Enter to close" prompt at the end.     |
 
 ## Output
 

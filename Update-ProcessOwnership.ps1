@@ -41,6 +41,10 @@ param(
     # Preview mode: show what would change for each process without saving anything.
     [switch]$WhatIf,
 
+    # Seconds to wait between processes that contact the server, to avoid
+    # overwhelming it (which can cause intermittent 500 errors). Default: 1.
+    [int]$DelaySeconds = 1,
+
     # Skip the "Press Enter to close" prompt at the end (useful for unattended runs).
     [switch]$NoPause
 )
@@ -496,6 +500,7 @@ if (-not $WhatIf) {
 $results = @()
 $currentIndex = 0
 $total = $csv.Count
+$serverCallMade = $false   # used to throttle requests without delaying before the first call
 
 foreach ($row in $csv) {
     $currentIndex++
@@ -533,6 +538,12 @@ foreach ($row in $csv) {
         }
         continue
     }
+
+    # Throttle: pause between processes that contact the server (not before the first).
+    if ($serverCallMade -and $DelaySeconds -gt 0) {
+        Start-Sleep -Seconds $DelaySeconds
+    }
+    $serverCallMade = $true
 
     $resp = Invoke-ApiGet -Url "$siteUrl/Api/v1/Processes/$processId" -Token $token
     if (-not $resp -or -not $resp.processJson) {
