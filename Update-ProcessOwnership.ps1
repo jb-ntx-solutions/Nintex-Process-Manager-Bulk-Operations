@@ -39,7 +39,10 @@ param(
     [string]$CsvPath,
 
     # Preview mode: show what would change for each process without saving anything.
-    [switch]$WhatIf
+    [switch]$WhatIf,
+
+    # Skip the "Press Enter to close" prompt at the end (useful for unattended runs).
+    [switch]$NoPause
 )
 
 # ============================================================================
@@ -229,15 +232,26 @@ function Read-CsvWithFlexibleHeaders {
 }
 
 # Returns the value of the first matching column on a CSV row, or $null.
+# Header names are matched case-insensitively and tolerantly: a leading UTF-8
+# BOM (which Import-Csv attaches to the first column name) and surrounding
+# whitespace are stripped before comparing.
 function Get-RowValue {
     param(
         $Row,
         [string[]]$ColumnNames
     )
-    $names = $Row.PSObject.Properties.Name
+
+    # Build a lookup of cleaned header name -> property (case-insensitive keys).
+    $bom = [char]0xFEFF
+    $map = @{}
+    foreach ($prop in $Row.PSObject.Properties) {
+        $clean = $prop.Name.Trim($bom).Trim()
+        if (-not $map.ContainsKey($clean)) { $map[$clean] = $prop }
+    }
+
     foreach ($col in $ColumnNames) {
-        if ($names -contains $col) {
-            $val = "$($Row.$col)".Trim()
+        if ($map.ContainsKey($col)) {
+            $val = "$($map[$col].Value)".Trim()
             if ($val) { return $val }
         }
     }
@@ -379,6 +393,8 @@ function Get-DefinitionValue {
 # MAIN
 # ============================================================================
 
+try {
+
 Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "NINTEX PM - BULK UPDATE PROCESS OWNERSHIP" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
@@ -399,8 +415,19 @@ if (-not $CsvPath) {
 }
 $csv = Read-CsvWithFlexibleHeaders -Path $CsvPath
 if (-not $csv) { return }
+$csv = @($csv)   # ensure array semantics so .Count and the loop are reliable for single-row files
 Write-Host "Loaded $($csv.Count) row(s) from '$CsvPath'" -ForegroundColor Green
 Write-Host "Blank owner/expert cells leave that role unchanged. Keywords ($($script:UnassignKeywords -join ', ')) set the placeholder user." -ForegroundColor Gray
+
+# Sanity check: make sure a ProcessID column was actually matched.
+$allIds = @($csv | ForEach-Object { Get-IdFromCsvRow -Row $_ } | Where-Object { $_ })
+if ($allIds.Count -eq 0) {
+    $headers = ($csv[0].PSObject.Properties.Name) -join ', '
+    Write-Host "`nNo ProcessID column could be matched in the CSV." -ForegroundColor Red
+    Write-Host "Detected headers: $headers" -ForegroundColor Yellow
+    Write-Host "Expected one of: ProcessID, ProcessId, Process ID, ProcessUniqueId, Id, ID" -ForegroundColor Yellow
+    return
+}
 
 # The Processes API path expects the process UniqueId (GUID). Warn if values look
 # like numeric internal Ids, which the endpoint will not resolve.
@@ -599,4 +626,19 @@ if ($WhatIf) {
     Write-Host "Successful      : $(($results | Where-Object { $_.Status -eq 'Success' }).Count)" -ForegroundColor Green
     Write-Host "Skipped         : $(($results | Where-Object { $_.Status -eq 'Skipped' }).Count)" -ForegroundColor Gray
     Write-Host "Failed          : $(($results | Where-Object { $_.Status -eq 'Failed' }).Count)" -ForegroundColor Red
+}
+
+}
+catch {
+    # Surface any unhandled error instead of letting the window vanish.
+    Write-Host "`nUnexpected error: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
+}
+finally {
+    # Keep the window open so output is readable when the script is launched by
+    # double-clicking or via a shortcut (where the console closes on exit).
+    if (-not $NoPause) {
+        Write-Host ""
+        [void](Read-Host "Press Enter to close")
+    }
 }
