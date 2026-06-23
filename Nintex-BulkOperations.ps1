@@ -488,6 +488,105 @@ function Get-IdFromCsvRow {
     return $null
 }
 
+# Matches a Nintex process UniqueId (GUID) so we can tell GUIDs apart from numeric Process IDs
+$script:ProcessGuidRegex = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
+# Cache of numeric Process ID -> processUniqueId, built lazily on the first numeric lookup
+$script:ProcessUniqueIdMap = $null
+
+function Test-IsProcessGuid {
+    param([string]$Value)
+    return ($Value -and ($Value -match $script:ProcessGuidRegex))
+}
+
+function Get-ProcessUniqueIdMap {
+    # Builds a numeric ID -> processUniqueId lookup by paging the process list
+    # (ListType 0 = active, 7 = archived) so CSVs can use either numeric IDs or GUIDs.
+    param(
+        [string]$SiteURL,
+        [string]$Token
+    )
+
+    $map = @{}
+    foreach ($listType in @(0, 7)) {
+        $page = 1
+        $pageSize = 200
+        do {
+            $url = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$pageSize&ListType=$listType"
+            $response = Invoke-ApiGet -Url $url -Token $Token
+            if ($response -and $response.items) {
+                foreach ($item in $response.items) {
+                    if ($null -ne $item.id -and $item.processUniqueId) {
+                        $map["$($item.id)"] = $item.processUniqueId
+                    }
+                }
+            }
+            $page++
+        } while ($response -and $response.items -and $response.items.Count -eq $pageSize)
+    }
+    return $map
+}
+
+function Resolve-ProcessUniqueId {
+    # Returns the processUniqueId (GUID) for a numeric Process ID, or $null if not found.
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$NumericId
+    )
+
+    if ($null -eq $script:ProcessUniqueIdMap) {
+        Write-Host "  Building Process ID lookup (numeric ID -> uniqueId)..." -ForegroundColor Gray
+        $script:ProcessUniqueIdMap = Get-ProcessUniqueIdMap -SiteURL $SiteURL -Token $Token
+        Write-Host "  Mapped $($script:ProcessUniqueIdMap.Count) processes" -ForegroundColor Gray
+    }
+
+    if ($script:ProcessUniqueIdMap.ContainsKey("$NumericId")) {
+        return $script:ProcessUniqueIdMap["$NumericId"]
+    }
+    return $null
+}
+
+function Get-ProcessModel {
+    # The /Api/v1/Processes/{id} endpoint returns the process under a "processJson"
+    # wrapper; unwrap it (falling back to a flat response) so callers can read the
+    # model's fields directly. PowerShell property access is case-insensitive, so
+    # callers can use .uniqueId / .name / .isArchived against the PascalCase model.
+    param($Response)
+
+    if (-not $Response) { return $null }
+    if ($Response.processJson) { return $Response.processJson }
+    return $Response
+}
+
+function Get-ProcessById {
+    # Fetches a process by CSV ID, accepting either a numeric Process ID or a GUID
+    # processUniqueId. Tries a direct fetch first, then resolves numeric IDs to a GUID
+    # and retries. Returns the process model (with UniqueId/Name/IsArchived) or $null.
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$Id
+    )
+
+    if (-not $Id) { return $null }
+
+    # Direct fetch (works for GUIDs and, on some versions, numeric IDs)
+    $model = Get-ProcessModel -Response (Invoke-ApiGet -Url "$SiteURL/Api/v1/Processes/$Id" -Token $Token)
+    if ($model -and $model.uniqueId) { return $model }
+
+    # Direct fetch didn't resolve. If the ID isn't a GUID, map numeric ID -> uniqueId and retry.
+    if (-not (Test-IsProcessGuid -Value $Id)) {
+        $uniqueId = Resolve-ProcessUniqueId -SiteURL $SiteURL -Token $Token -NumericId $Id
+        if ($uniqueId) {
+            $model = Get-ProcessModel -Response (Invoke-ApiGet -Url "$SiteURL/Api/v1/Processes/$uniqueId" -Token $Token)
+            if ($model -and $model.uniqueId) { return $model }
+        }
+    }
+
+    return $null
+}
+
 function Get-NewGroupIdFromCsvRow {
     param($Row)
 
@@ -1374,9 +1473,8 @@ function Invoke-BulkArchive {
                 Write-Host "`r  Archiving Process $currentIndex of $totalProcesses..." -NoNewline -ForegroundColor Gray
             }
 
-            # Fetch process details to get uniqueId
-            $verifyUrl = "$SiteURL/Api/v1/Processes/$processId"
-            $process = Invoke-ApiGet -Url $verifyUrl -Token $Token
+            # Fetch process details to get uniqueId (accepts numeric Process IDs or GUIDs)
+            $process = Get-ProcessById -SiteURL $SiteURL -Token $Token -Id $processId
 
             if ($process -and $process.uniqueId) {
                 $processUniqueId = $process.uniqueId
@@ -1399,7 +1497,7 @@ function Invoke-BulkArchive {
 
                     if ($result) {
                         # Verify archive
-                        $process = Invoke-ApiGet -Url $verifyUrl -Token $Token
+                        $process = Get-ProcessById -SiteURL $SiteURL -Token $Token -Id $processUniqueId
                         if ($process -and $process.isArchived) {
                             $results += [PSCustomObject]@{
                                 ObjectType = "Process"
