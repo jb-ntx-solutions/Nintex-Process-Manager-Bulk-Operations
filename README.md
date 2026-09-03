@@ -1,4 +1,4 @@
-# Nintex Process Manager Bulk Operations
+# Nintex Process Manager Bulk Operations (DEPRECATED)
 
 A comprehensive PowerShell script for performing bulk operations on Nintex Process Manager (Promapp) processes and documents.
 
